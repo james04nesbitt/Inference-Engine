@@ -1,3 +1,10 @@
+# Bazel
+bazel-*
+MODULE.bazel.lock
+
+# Model files (too large for git)
+*.gguf
+
 # Prerequisites
 *.d
 

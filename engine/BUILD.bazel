@@ -1,0 +1,23 @@
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")
+
+cc_library(
+    name = "engine_lib",
+    srcs = ["engine.cc"],
+    hdrs = ["engine.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//engine/gguf",
+        "//engine/model",
+        "//engine/ops",
+        "//engine/tensor",
+        "//engine/tokenizer",
+    ],
+)
+
+cc_binary(
+    name = "inference",
+    srcs = ["main.cc"],
+    deps = [
+        ":engine_lib",
+    ],
+)

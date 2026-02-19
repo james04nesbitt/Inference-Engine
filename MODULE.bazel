@@ -1,0 +1,17 @@
+"""
+Inference Engine - A from-scratch C++ inference engine for open-weight LLMs.
+"""
+
+module(
+    name = "inference_engine",
+    version = "0.1.0",
+)
+
+# C++ rules
+bazel_dep(name = "rules_cc", version = "0.2.14")
+
+# Google Test for unit testing
+bazel_dep(name = "googletest", version = "1.17.0")
+
+# Abseil - Google's C++ common libraries
+bazel_dep(name = "abseil-cpp", version = "20250814.1", repo_name = "com_google_absl")

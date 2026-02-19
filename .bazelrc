@@ -1,0 +1,24 @@
+# Windows: Point Bazel to Git's bash for test runner
+build --action_env=BAZEL_SH="C:/Program Files/Git/bin/bash.exe"
+
+# Bazel 9 compatibility: auto-load cc rules from rules_cc for deps
+# that still use native cc_library in their BUILD files
+common --incompatible_autoload_externally=cc_library,cc_binary,cc_test,cc_proto_library,cc_shared_library,cc_import
+
+# C++ Standard
+build --cxxopt=/std:c++20
+build --host_cxxopt=/std:c++20
+
+# Warnings (MSVC flags)
+build --cxxopt=/W3
+build --cxxopt=/WX-
+
+# Optimizations for release builds
+build:release --compilation_mode=opt
+build:release --cxxopt=/O2
+
+# Debug builds
+build:debug --compilation_mode=dbg
+
+# Test output
+test --test_output=errors

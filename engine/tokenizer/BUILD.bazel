@@ -1,0 +1,13 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+cc_library(
+    name = "tokenizer",
+    srcs = [
+        "bpe_tokenizer.cc",
+    ],
+    hdrs = [
+        "bpe_tokenizer.h",
+        "tokenizer.h",
+    ],
+    visibility = ["//visibility:public"],
+)

@@ -1,0 +1,15 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+cc_library(
+    name = "model",
+    srcs = ["layers.cc"],
+    hdrs = [
+        "config.h",
+        "layers.h",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//engine/ops",
+        "//engine/tensor",
+    ],
+)
