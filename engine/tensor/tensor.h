@@ -2,130 +2,133 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <initializer_list>
-#include <memory>
-#include <numeric>
-#include <stdexcept>
 #include <string>
 #include <vector>
 
-#include "absl/types/span.h"
-
 namespace ie {
 
-// Supported data types for tensor elements.
-// You'll extend this as you add quantization support.
+
 enum class DType {
   kFloat32,
   kFloat16,
-  kBFloat16,
-  kInt32,
   kInt8,
-  // TODO: Add quantized types (Q4_0, Q4_K_M, Q8_0, etc.)
 };
 
-// Returns the size in bytes of a single element of the given dtype.
+
 size_t DTypeSize(DType dtype);
 
-// Returns a human-readable name for the dtype.
 std::string DTypeName(DType dtype);
 
 // ============================================================================
-// Tensor - The core multi-dimensional array class.
+// Tensor — A multi-dimensional array of numbers.
 //
-// YOUR MAIN LEARNING OBJECTIVE: Implement this class fully.
+// This is THE fundamental data structure in ML. Everything — weights,
+// activations, embeddings — is a tensor.
 //
-// Design notes:
-//   - Tensors own their data via shared_ptr (enables cheap views/slices).
-//   - Shape is stored as a vector of int64_t dimensions.
-//   - Strides enable non-contiguous views (slicing, transposing).
+// YOUR JOB: Build this class from scratch. Start simple and grow it.
 //
-// Concepts to explore as you implement:
-//   - Memory layout (row-major vs column-major)
-//   - Broadcasting rules (NumPy-style)
-//   - Views vs copies (when does data get shared?)
-//   - Move semantics and RAII
+// A tensor needs to know three things:
+//   1. SHAPE:  How many dimensions and how big each one is.
+//              Example: {2, 3} means a 2x3 matrix (2 rows, 3 columns).
+//
+//   2. DATA:   The actual numbers, stored as a flat array in memory.
+//              A {2, 3} tensor has 6 numbers stored contiguously.
+//
+//   3. DTYPE:  What kind of number each element is (float32, int8, etc.)
+//
+// Key questions to answer as you build:
+//   - Who OWNS the data? (What happens when a Tensor goes out of scope?)
+//   - How do you go from multi-dimensional indices like [row][col] to a
+//     single flat index into the data array?
+//   - What happens when you "reshape" a tensor? Does the data move?
+//
 // ============================================================================
 class Tensor {
  public:
-  // --- Construction ---
+  // --- Constructors (START HERE) ---
 
-  // Creates an empty (scalar) tensor.
+  // Default constructor: Creates an empty tensor.
   Tensor();
 
   // Creates a tensor with the given shape, filled with zeros.
+  //
+  // Example: Tensor t({2, 3});  // Creates a 2x3 matrix of zeros
+  //
+  // What you need to do:
+  //   1. Store the shape
+  //   2. Store the dtype
+  //   3. Calculate how many total elements: 2 * 3 = 6
+  //   4. Allocate memory: 6 elements * 4 bytes each = 24 bytes
+  //   5. Zero out the memory
+  //
+  // QUESTION FOR YOU: How should you allocate the memory?
+  //   Option A: new float[6]                    — raw pointer, you manage delete[]
+  //   Option B: std::vector<uint8_t>(24)        — vector manages memory for you
+  //   Option C: std::unique_ptr<uint8_t[]>(...)  — smart pointer, auto-deletes
+  //   Option D: std::shared_ptr<uint8_t[]>(...)  — reference-counted smart pointer
+  //
+  //   Hint: Option D is what PyTorch uses. Why? Because when you "slice" or
+  //   "reshape" a tensor, you want multiple Tensor objects to share the SAME
+  //   underlying data. shared_ptr lets you do that safely.
+  //
+  //   But start with whatever makes sense to you! You can refactor later.
+  //
   Tensor(std::vector<int64_t> shape, DType dtype = DType::kFloat32);
-
-  // Creates a tensor from an existing data buffer (takes ownership).
-  // The buffer must contain exactly `product(shape) * DTypeSize(dtype)` bytes.
-  Tensor(std::vector<int64_t> shape, DType dtype,
-         std::shared_ptr<uint8_t[]> data);
-
-  // --- Factory Methods ---
-  static Tensor Zeros(std::vector<int64_t> shape,
-                      DType dtype = DType::kFloat32);
-  static Tensor Ones(std::vector<int64_t> shape,
-                     DType dtype = DType::kFloat32);
-  static Tensor Full(std::vector<int64_t> shape, float value,
-                     DType dtype = DType::kFloat32);
-
-  // Creates a tensor from a raw buffer without taking ownership.
-  // WARNING: The caller must ensure the buffer outlives the tensor.
-  static Tensor FromBuffer(void* data, std::vector<int64_t> shape,
-                           DType dtype = DType::kFloat32);
 
   // --- Properties ---
   const std::vector<int64_t>& shape() const { return shape_; }
-  const std::vector<int64_t>& strides() const { return strides_; }
   DType dtype() const { return dtype_; }
+
+  // Number of dimensions. A vector is 1D, a matrix is 2D, etc.
   int64_t ndim() const { return static_cast<int64_t>(shape_.size()); }
-  int64_t numel() const;  // Total number of elements
-  size_t nbytes() const;  // Total size in bytes
-  bool is_contiguous() const;
+
+  // Total number of elements. For shape {2, 3, 4} this is 2*3*4 = 24.
+  int64_t numel() const;
+
+  // Total size in bytes. numel() * DTypeSize(dtype).
+  size_t nbytes() const;
 
   // --- Data Access ---
-  void* data_ptr() { return data_.get(); }
-  const void* data_ptr() const { return data_.get(); }
+  // Returns a raw pointer to the underlying data.
+  // You decide the return type based on how you store the data.
+  void* data_ptr();
+  const void* data_ptr() const;
 
-  // Typed data access. Throws if dtype doesn't match.
-  template <typename T>
-  T* data() {
-    // TODO: Add dtype check
-    return reinterpret_cast<T*>(data_.get());
-  }
-
-  template <typename T>
-  const T* data() const {
-    // TODO: Add dtype check
-    return reinterpret_cast<const T*>(data_.get());
-  }
-
-  // Element access (for debugging, not performance-critical).
-  // TODO: Implement multi-dimensional indexing
+  // --- Element Access ---
+  // Given indices like {1, 2} for a 2D tensor, return the value at that position.
+  //
+  // THE KEY INSIGHT: Your data is stored as a flat 1D array.
+  // For a {2, 3} tensor, the layout in memory is:
+  //
+  //   Logical view:     Flat memory:
+  //   [0,0] [0,1] [0,2]    [0] [1] [2] [3] [4] [5]
+  //   [1,0] [1,1] [1,2]
+  //
+  // So element [1, 2] is at flat index: 1 * 3 + 2 = 5
+  // General formula: flat_index = indices[0] * dim[1] + indices[1]
+  //
+  // For 3D {2, 3, 4}: flat_index = i * (3*4) + j * 4 + k
+  //
+  // TODO: Implement this!
   float at(std::vector<int64_t> indices) const;
   void set(std::vector<int64_t> indices, float value);
 
-  // --- Shape Manipulation ---
-  // TODO: Implement these operations
-  Tensor reshape(std::vector<int64_t> new_shape) const;
-  Tensor view(std::vector<int64_t> new_shape) const;  // Must be contiguous
-  Tensor transpose(int64_t dim0, int64_t dim1) const;
-  Tensor slice(int64_t dim, int64_t start, int64_t end) const;
-  Tensor contiguous() const;  // Returns a contiguous copy if needed
-
   // --- Debugging ---
   std::string to_string() const;
-  void print() const;
 
  private:
   std::vector<int64_t> shape_;
-  DType dtype_;  // Must be declared before strides_ (init order!)
-  std::vector<int64_t> strides_;
-  std::shared_ptr<uint8_t[]> data_;
+  DType dtype_;
 
-  // Computes default strides for a contiguous tensor with the given shape.
-  static std::vector<int64_t> ComputeStrides(const std::vector<int64_t>& shape,
-                                             DType dtype);
+  // ⬇️ YOU DECIDE: How to store the actual data.
+  //
+  // Some options:
+  //   std::vector<uint8_t> data_;           // Simple, vector manages memory
+  //   std::unique_ptr<uint8_t[]> data_;     // Smart pointer, you own it
+  //   std::shared_ptr<uint8_t[]> data_;     // Shared ownership (PyTorch style)
+  //
+  // Start with std::vector<uint8_t> if you're not sure — it's the simplest.
+  // You can always refactor to shared_ptr later when you need tensor views.
 };
 
 }  // namespace ie

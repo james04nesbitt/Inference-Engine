@@ -1,7 +1,5 @@
 #include "engine/tensor/tensor.h"
 
-#include <algorithm>
-#include <cstring>
 #include <iostream>
 #include <numeric>
 #include <sstream>
@@ -9,16 +7,16 @@
 
 namespace ie {
 
+// ============================================================================
+// DType helpers — these are done for you since they're just boilerplate.
+// ============================================================================
+
 size_t DTypeSize(DType dtype) {
   switch (dtype) {
     case DType::kFloat32:
       return 4;
     case DType::kFloat16:
       return 2;
-    case DType::kBFloat16:
-      return 2;
-    case DType::kInt32:
-      return 4;
     case DType::kInt8:
       return 1;
     default:
@@ -32,10 +30,6 @@ std::string DTypeName(DType dtype) {
       return "float32";
     case DType::kFloat16:
       return "float16";
-    case DType::kBFloat16:
-      return "bfloat16";
-    case DType::kInt32:
-      return "int32";
     case DType::kInt8:
       return "int8";
     default:
@@ -43,123 +37,74 @@ std::string DTypeName(DType dtype) {
   }
 }
 
-// --- Construction ---
 
-Tensor::Tensor() : shape_({}), strides_({}), dtype_(DType::kFloat32) {}
+Tensor::Tensor() : shape_({}), dtype_(DType::kFloat32) {}
 
 Tensor::Tensor(std::vector<int64_t> shape, DType dtype)
-    : shape_(std::move(shape)),
-      dtype_(dtype),
-      strides_(ComputeStrides(shape_, dtype_)) {
-  size_t total_bytes = nbytes();
-  data_ = std::shared_ptr<uint8_t[]>(new uint8_t[total_bytes]());
+    : shape_(shape), dtype_(dtype) {
+  // TODO: Allocate memory for the tensor data!
+  //
+  // Steps:
+  //   1. Compute total bytes: numel() * DTypeSize(dtype)
+  //   2. Allocate that many bytes (however you chose to store data_)
+  //   3. Zero-fill the memory
+  //
+  // If using std::vector<uint8_t>:
+  //   data_.resize(nbytes(), 0);
+  //
+  // If using std::unique_ptr:
+  //   data_ = std::make_unique<uint8_t[]>(nbytes());
+  //   std::memset(data_.get(), 0, nbytes());
 }
-
-Tensor::Tensor(std::vector<int64_t> shape, DType dtype,
-               std::shared_ptr<uint8_t[]> data)
-    : shape_(std::move(shape)),
-      dtype_(dtype),
-      strides_(ComputeStrides(shape_, dtype_)),
-      data_(std::move(data)) {}
-
-// --- Factory Methods ---
-
-Tensor Tensor::Zeros(std::vector<int64_t> shape, DType dtype) {
-  return Tensor(std::move(shape), dtype);  // Already zero-initialized
-}
-
-Tensor Tensor::Ones(std::vector<int64_t> shape, DType dtype) {
-  return Full(std::move(shape), 1.0f, dtype);
-}
-
-Tensor Tensor::Full(std::vector<int64_t> shape, float value, DType dtype) {
-  Tensor t(shape, dtype);
-  if (dtype == DType::kFloat32) {
-    float* ptr = t.data<float>();
-    int64_t n = t.numel();
-    for (int64_t i = 0; i < n; ++i) {
-      ptr[i] = value;
-    }
-  } else {
-    // TODO: Handle other dtypes
-    throw std::runtime_error("Full() only supports float32 for now");
-  }
-  return t;
-}
-
-Tensor Tensor::FromBuffer(void* data, std::vector<int64_t> shape,
-                          DType dtype) {
-  // TODO: Implement non-owning view from external buffer
-  // Hint: You'll need a custom deleter that does nothing
-  throw std::runtime_error("FromBuffer not implemented yet");
-}
-
-// --- Properties ---
 
 int64_t Tensor::numel() const {
-  if (shape_.empty()) return 1;  // Scalar
-  return std::accumulate(shape_.begin(), shape_.end(), int64_t{1},
-                         std::multiplies<int64_t>());
+  if (shape_.empty()) return 1;  // A scalar tensor has 1 element
+  // Multiply all dimensions together: {2, 3, 4} -> 2 * 3 * 4 = 24
+  int64_t result = 1;
+  for (int64_t dim : shape_) {
+    result *= dim;
+  }
+  return result;
 }
 
 size_t Tensor::nbytes() const {
   return static_cast<size_t>(numel()) * DTypeSize(dtype_);
 }
 
-bool Tensor::is_contiguous() const {
-  // TODO: Check if strides match the default contiguous layout
-  // Hint: Compare strides_ with ComputeStrides(shape_, dtype_)
-  return true;  // Placeholder
+void* Tensor::data_ptr() {
+  // TODO: Return a pointer to your data storage.
+  // If using std::vector<uint8_t>:  return data_.data();
+  // If using unique_ptr:            return data_.get();
+  return nullptr;
 }
 
-// --- Element Access ---
+const void* Tensor::data_ptr() const {
+  // Same as above but const.
+  return nullptr;
+}
 
 float Tensor::at(std::vector<int64_t> indices) const {
-  // TODO: Implement with proper bounds checking and stride-based indexing
-  // This is your first real exercise! Think about:
-  //   offset = sum(indices[i] * strides_[i]) for each dimension
-  throw std::runtime_error("at() not implemented yet");
+  // TODO: Implement element access!
+  //
+  // For a tensor with shape {2, 3}, element at indices {1, 2}:
+  //   flat_index = 1 * 3 + 2 = 5
+  //
+  // General formula for N dimensions:
+  //   flat_index = 0
+  //   for i in range(ndim):
+  //     flat_index = flat_index * shape[i] + indices[i]
+  //
+  // Then read the float at that position in your data array:
+  //   return reinterpret_cast<const float*>(data_ptr())[flat_index];
+  //
+  // BONUS: Add bounds checking! Throw if indices[i] >= shape[i].
+  throw std::runtime_error("at() not implemented yet — this is your first TODO!");
 }
 
 void Tensor::set(std::vector<int64_t> indices, float value) {
-  // TODO: Mirror the at() implementation
+  // TODO: Same logic as at(), but write instead of read.
   throw std::runtime_error("set() not implemented yet");
 }
-
-// --- Shape Manipulation ---
-
-Tensor Tensor::reshape(std::vector<int64_t> new_shape) const {
-  // TODO: Implement reshape
-  // Key insight: reshape is only valid if the total number of elements
-  // doesn't change. If the tensor is contiguous, you can just change
-  // the shape and strides. If not, you need to copy first.
-  throw std::runtime_error("reshape() not implemented yet");
-}
-
-Tensor Tensor::view(std::vector<int64_t> new_shape) const {
-  // TODO: Like reshape but requires contiguity (no copy allowed)
-  throw std::runtime_error("view() not implemented yet");
-}
-
-Tensor Tensor::transpose(int64_t dim0, int64_t dim1) const {
-  // TODO: Swap dimensions and strides (no data copy needed!)
-  // This is the beauty of stride-based tensors.
-  throw std::runtime_error("transpose() not implemented yet");
-}
-
-Tensor Tensor::slice(int64_t dim, int64_t start, int64_t end) const {
-  // TODO: Return a view into a sub-range of one dimension
-  // Hint: Adjust the data pointer and shape, keep same strides
-  throw std::runtime_error("slice() not implemented yet");
-}
-
-Tensor Tensor::contiguous() const {
-  if (is_contiguous()) return *this;  // Already contiguous, share data
-  // TODO: Copy data into a new contiguous buffer
-  throw std::runtime_error("contiguous() not implemented yet");
-}
-
-// --- Debugging ---
 
 std::string Tensor::to_string() const {
   std::ostringstream ss;
@@ -170,22 +115,6 @@ std::string Tensor::to_string() const {
   }
   ss << "], dtype=" << DTypeName(dtype_) << ", numel=" << numel() << ")";
   return ss.str();
-}
-
-void Tensor::print() const { std::cout << to_string() << std::endl; }
-
-// --- Private Helpers ---
-
-std::vector<int64_t> Tensor::ComputeStrides(const std::vector<int64_t>& shape,
-                                            DType dtype) {
-  if (shape.empty()) return {};
-  std::vector<int64_t> strides(shape.size());
-  int64_t stride = static_cast<int64_t>(DTypeSize(dtype));
-  for (int i = static_cast<int>(shape.size()) - 1; i >= 0; --i) {
-    strides[i] = stride;
-    stride *= shape[i];
-  }
-  return strides;
 }
 
 }  // namespace ie

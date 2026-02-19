@@ -5,9 +5,6 @@ cc_library(
     srcs = ["tensor.cc"],
     hdrs = ["tensor.h"],
     visibility = ["//visibility:public"],
-    deps = [
-        "@com_google_absl//absl/types:span",
-    ],
 )
 
 cc_test(
