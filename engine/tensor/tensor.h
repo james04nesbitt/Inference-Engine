@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -19,35 +20,10 @@ size_t DTypeSize(DType dtype);
 
 std::string DTypeName(DType dtype);
 
-// ============================================================================
-// Tensor — A multi-dimensional array of numbers.
-//
-// This is THE fundamental data structure in ML. Everything — weights,
-// activations, embeddings — is a tensor.
-//
-// YOUR JOB: Build this class from scratch. Start simple and grow it.
-//
-// A tensor needs to know three things:
-//   1. SHAPE:  How many dimensions and how big each one is.
-//              Example: {2, 3} means a 2x3 matrix (2 rows, 3 columns).
-//
-//   2. DATA:   The actual numbers, stored as a flat array in memory.
-//              A {2, 3} tensor has 6 numbers stored contiguously.
-//
-//   3. DTYPE:  What kind of number each element is (float32, int8, etc.)
-//
-// Key questions to answer as you build:
-//   - Who OWNS the data? (What happens when a Tensor goes out of scope?)
-//   - How do you go from multi-dimensional indices like [row][col] to a
-//     single flat index into the data array?
-//   - What happens when you "reshape" a tensor? Does the data move?
-//
-// ============================================================================
+
 class Tensor {
  public:
-  // --- Constructors (START HERE) ---
 
-  // Default constructor: Creates an empty tensor.
   Tensor();
 
   // Creates a tensor with the given shape, filled with zeros.
@@ -88,9 +64,6 @@ class Tensor {
   // Total size in bytes. numel() * DTypeSize(dtype).
   size_t nbytes() const;
 
-  // --- Data Access ---
-  // Returns a raw pointer to the underlying data.
-  // You decide the return type based on how you store the data.
   void* data_ptr();
   const void* data_ptr() const;
 
@@ -109,26 +82,16 @@ class Tensor {
   //
   // For 3D {2, 3, 4}: flat_index = i * (3*4) + j * 4 + k
   //
-  // TODO: Implement this!
   float at(std::vector<int64_t> indices) const;
   void set(std::vector<int64_t> indices, float value);
 
-  // --- Debugging ---
   std::string to_string() const;
 
  private:
   std::vector<int64_t> shape_;
   DType dtype_;
 
-  // ⬇️ YOU DECIDE: How to store the actual data.
-  //
-  // Some options:
-  //   std::vector<uint8_t> data_;           // Simple, vector manages memory
-  //   std::unique_ptr<uint8_t[]> data_;     // Smart pointer, you own it
-  //   std::shared_ptr<uint8_t[]> data_;     // Shared ownership (PyTorch style)
-  //
-  // Start with std::vector<uint8_t> if you're not sure — it's the simplest.
-  // You can always refactor to shared_ptr later when you need tensor views.
+  std::shared_ptr<uint8_t[]> data_;     
 };
 
 }  // namespace ie

@@ -42,24 +42,13 @@ Tensor::Tensor() : shape_({}), dtype_(DType::kFloat32) {}
 
 Tensor::Tensor(std::vector<int64_t> shape, DType dtype)
     : shape_(shape), dtype_(dtype) {
-  // TODO: Allocate memory for the tensor data!
-  //
-  // Steps:
-  //   1. Compute total bytes: numel() * DTypeSize(dtype)
-  //   2. Allocate that many bytes (however you chose to store data_)
-  //   3. Zero-fill the memory
-  //
-  // If using std::vector<uint8_t>:
-  //   data_.resize(nbytes(), 0);
-  //
-  // If using std::unique_ptr:
-  //   data_ = std::make_unique<uint8_t[]>(nbytes());
-  //   std::memset(data_.get(), 0, nbytes());
+    data_ = std::shared_ptr<uint8_t[]>(new uint8_t[nbytes()]);
+    std::memset(data_.get(), 0, nbytes());
 }
 
+//return the number of elements in the tensor
 int64_t Tensor::numel() const {
-  if (shape_.empty()) return 1;  // A scalar tensor has 1 element
-  // Multiply all dimensions together: {2, 3, 4} -> 2 * 3 * 4 = 24
+  if (shape_.empty()) return 1;  
   int64_t result = 1;
   for (int64_t dim : shape_) {
     result *= dim;
@@ -67,24 +56,20 @@ int64_t Tensor::numel() const {
   return result;
 }
 
+//return the number of bytes in the tensor
 size_t Tensor::nbytes() const {
   return static_cast<size_t>(numel()) * DTypeSize(dtype_);
 }
 
 void* Tensor::data_ptr() {
-  // TODO: Return a pointer to your data storage.
-  // If using std::vector<uint8_t>:  return data_.data();
-  // If using unique_ptr:            return data_.get();
-  return nullptr;
+  return data_.get();
 }
 
 const void* Tensor::data_ptr() const {
-  // Same as above but const.
-  return nullptr;
+  return data_.get();
 }
 
 float Tensor::at(std::vector<int64_t> indices) const {
-  // TODO: Implement element access!
   //
   // For a tensor with shape {2, 3}, element at indices {1, 2}:
   //   flat_index = 1 * 3 + 2 = 5

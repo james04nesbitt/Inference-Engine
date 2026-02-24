@@ -1,0 +1,17 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+cc_library(
+    name = "attention",
+    srcs = [
+        "flash_attention.cc",
+        "kv_cache.cc",
+    ],
+    hdrs = [
+        "flash_attention.h",
+        "kv_cache.h",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//engine/tensor",
+    ],
+)

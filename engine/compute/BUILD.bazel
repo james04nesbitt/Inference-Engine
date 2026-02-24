@@ -1,0 +1,20 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+cc_library(
+    name = "compute",
+    srcs = [
+        "simd_kernels.cc",
+        "thread_pool.cc",
+    ],
+    hdrs = [
+        "simd_kernels.h",
+        "thread_pool.h",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//engine/tensor",
+        # TODO: Add "@highway" when implementing SIMD kernels.
+        # Currently blocked by rules_foreign_cc incompatibility with Bazel 9.
+        # Workaround: use git_override in MODULE.bazel to pin a fixed version.
+    ],
+)

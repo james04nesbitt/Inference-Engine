@@ -23,3 +23,13 @@ build:debug --compilation_mode=dbg
 
 # Test output
 test --test_output=errors
+
+# =============================================================================
+# SIMD / Native Architecture Optimizations
+#
+# Use --config=avx2 for builds targeting SIMD-accelerated kernels.
+# Highway will auto-detect the best available instruction set, but
+# -march=native tells the compiler to enable all CPU features.
+# =============================================================================
+build:avx2 --cxxopt=-march=native --host_cxxopt=-march=native
+build:avx2 --cxxopt=/arch:AVX2 --host_cxxopt=/arch:AVX2
