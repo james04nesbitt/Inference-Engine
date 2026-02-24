@@ -3,6 +3,8 @@ CompileFlags:
     - "-xc++"
     - "-std=c++20"
     - "-Ic:/Users/james/Coding/Projects/Inference-Engine"
-    - "-IC:/users/james/_bazel_james/kerzryb2/execroot/_main/external/abseil-cpp+"
+    - "-IC:/users/james/_bazel_james/kerzryb2/external/abseil-cpp+"
+    - "-IC:/users/james/_bazel_james/kerzryb2/external/googletest+/googletest/include"
+    - "-IC:/users/james/_bazel_james/kerzryb2/external/googletest+/googlemock/include"
   Remove:
     - "-W*"
