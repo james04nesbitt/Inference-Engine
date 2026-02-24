@@ -1,8 +1,6 @@
 #include "engine/tensor/tensor.h"
 
-#include <cmath>
 #include <cstring>
-#include <limits>
 
 #include <gtest/gtest.h>
 
@@ -16,7 +14,7 @@ namespace {
 TEST(TensorTest, DefaultConstruction) {
   Tensor t;
   EXPECT_EQ(t.ndim(), 0);
-  EXPECT_EQ(t.numel(), 1);  // Scalar = 1 element
+  EXPECT_EQ(t.numel(), 1); // Scalar = 1 element
   EXPECT_EQ(t.dtype(), DType::kFloat32);
 }
 
@@ -45,7 +43,7 @@ TEST(TensorTest, SingleElement) {
 }
 
 TEST(TensorTest, LargeShape) {
-  Tensor t({1024, 1152});  // Gemma-3 sized
+  Tensor t({1024, 1152}); // Gemma-3 sized
   EXPECT_EQ(t.numel(), 1024 * 1152);
   EXPECT_EQ(t.nbytes(), static_cast<size_t>(1024 * 1152 * 4));
 }
@@ -69,11 +67,11 @@ TEST(TensorTest, DTypeNames) {
 TEST(TensorTest, NonDefaultDtype) {
   Tensor f16({4, 4}, DType::kFloat16);
   EXPECT_EQ(f16.dtype(), DType::kFloat16);
-  EXPECT_EQ(f16.nbytes(), 16 * 2);  // 16 elements * 2 bytes
+  EXPECT_EQ(f16.nbytes(), 16 * 2); // 16 elements * 2 bytes
 
   Tensor i8({4, 4}, DType::kInt8);
   EXPECT_EQ(i8.dtype(), DType::kInt8);
-  EXPECT_EQ(i8.nbytes(), 16 * 1);  // 16 elements * 1 byte
+  EXPECT_EQ(i8.nbytes(), 16 * 1); // 16 elements * 1 byte
 }
 
 // ============================================================================
@@ -89,7 +87,7 @@ TEST(TensorTest, DataIsAllocated) {
 
 TEST(TensorTest, ZeroInitialized) {
   Tensor t({4, 4});
-  const float* p = t.data<float>();
+  const float *p = t.data<float>();
   for (int64_t i = 0; i < t.numel(); ++i) {
     EXPECT_FLOAT_EQ(p[i], 0.0f) << "Element " << i << " not zero";
   }
@@ -107,7 +105,7 @@ TEST(TensorTest, SetAndGet2D) {
   EXPECT_FLOAT_EQ(t.at({0, 0}), 1.0f);
   EXPECT_FLOAT_EQ(t.at({0, 2}), 3.0f);
   EXPECT_FLOAT_EQ(t.at({1, 2}), 42.0f);
-  EXPECT_FLOAT_EQ(t.at({0, 1}), 0.0f);  // Untouched = zero
+  EXPECT_FLOAT_EQ(t.at({0, 1}), 0.0f); // Untouched = zero
 }
 
 TEST(TensorTest, SetAndGet3D) {
@@ -168,7 +166,7 @@ TEST(TensorTest, FlatIndex3D) {
   EXPECT_EQ(t.flat_index({0, 0, 1}), 1);
   EXPECT_EQ(t.flat_index({0, 1, 0}), 4);
   EXPECT_EQ(t.flat_index({1, 0, 0}), 12);
-  EXPECT_EQ(t.flat_index({1, 2, 3}), 23);  // Last element
+  EXPECT_EQ(t.flat_index({1, 2, 3}), 23); // Last element
 }
 
 // ============================================================================
@@ -230,7 +228,7 @@ TEST(TensorTest, Int8Truncation) {
   // Fractional values get truncated (cast to int8_t).
   Tensor t({1}, DType::kInt8);
   t.set({0}, 3.7f);
-  EXPECT_FLOAT_EQ(t.at({0}), 3.0f);  // Truncated, not rounded
+  EXPECT_FLOAT_EQ(t.at({0}), 3.0f); // Truncated, not rounded
 }
 
 TEST(TensorTest, Int8Range) {
@@ -251,7 +249,7 @@ TEST(TensorTest, TypedDataAccessFloat32) {
   t.set({1}, 20.0f);
   t.set({2}, 30.0f);
 
-  const float* p = t.data<float>();
+  const float *p = t.data<float>();
   EXPECT_FLOAT_EQ(p[0], 10.0f);
   EXPECT_FLOAT_EQ(p[1], 20.0f);
   EXPECT_FLOAT_EQ(p[2], 30.0f);
@@ -259,7 +257,7 @@ TEST(TensorTest, TypedDataAccessFloat32) {
 
 TEST(TensorTest, TypedDataMutate) {
   Tensor t({3});
-  float* p = t.data<float>();
+  float *p = t.data<float>();
   p[0] = 100.0f;
   p[1] = 200.0f;
   p[2] = 300.0f;
@@ -271,7 +269,7 @@ TEST(TensorTest, TypedDataMutate) {
 
 TEST(TensorTest, TypedDataInt8) {
   Tensor t({3}, DType::kInt8);
-  int8_t* p = t.data<int8_t>();
+  int8_t *p = t.data<int8_t>();
   p[0] = 10;
   p[1] = -50;
   p[2] = 127;
@@ -324,5 +322,5 @@ TEST(TensorTest, FillAndReadback2D) {
   }
 }
 
-}  // namespace
-}  // namespace ie
+} // namespace
+} // namespace ie
