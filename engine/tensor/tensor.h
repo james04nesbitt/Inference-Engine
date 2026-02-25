@@ -24,13 +24,10 @@ class Tensor {
 public:
   Tensor();
 
-  // TODO: Change allocation to use 64-byte aligned memory for Highway SIMD.
-  // Highway's hn::Load/Store require aligned pointers. AVX-512 needs 64-byte
-  // alignment, AVX2 needs 32-byte. Use std::aligned_alloc (or _aligned_malloc
-  // on Windows) and a custom deleter on the shared_ptr.
+  // Allocates 64-byte aligned memory for Highway SIMD compatibility.
   explicit Tensor(std::vector<int64_t> shape, DType dtype = DType::kFloat32);
 
-  // --- Static Factories (TODO: Implement!) ---
+  // --- Static Factories ---
 
   // Wrap an existing buffer in a Tensor. Takes ownership via shared_ptr.
   // Used by GGUF loader: read bytes from file → wrap as Tensor without copying.
@@ -110,27 +107,13 @@ public:
   Tensor transpose(int64_t dim0, int64_t dim1) const;
   Tensor permute(std::vector<int64_t> dims) const;
 
-  // --- Slicing (TODO: Implement!) ---
+  // --- Slicing ---
   // Returns a zero-copy sub-tensor view along a given dimension.
   // Example: For a [4, 8, 16] tensor, slice(0, 1, 3) returns a [2, 8, 16] view.
-  // The returned tensor shares the same underlying data buffer but with an
-  // adjusted offset_ and shape. Strides stay the same.
-  //
-  // This is critical for:
-  //   - FlashAttention tiling: extracting [Br, d] blocks of Q and [Bc, d] of
-  //   K/V
-  //   - Matmul M-dimension partitioning across threads
-  //   - Extracting per-layer weights from a fused weight tensor
-  //
-  // Hint: New offset = old_offset + start * strides_[dim]
-  //       New shape[dim] = end - start
-  //       Everything else stays the same.
   Tensor slice(int64_t dim, int64_t start, int64_t end) const;
 
-  // --- Utilities (TODO: Implement!) ---
+  // --- Utilities ---
   // Fill entire tensor with a scalar value (respects dtype).
-  // Useful for initializing FlashAttention accumulators (O = 0, l = 0, m =
-  // -inf).
   void fill(float val);
 
   // Returns a contiguous (C-order) copy of this tensor.
@@ -139,7 +122,7 @@ public:
   // assume contiguous memory.
   Tensor contiguous() const;
 
-  // --- Quantization Metadata (TODO: Implement accessors!) ---
+  // --- Quantization Metadata ---
   // Whether this tensor has quantization parameters attached.
   bool is_quantized() const;
 
@@ -153,21 +136,17 @@ public:
   const std::vector<float> &scales() const;
   const std::vector<int32_t> &zero_points() const;
 
-  // --- DType Conversion (TODO: Implement!) ---
+  // --- DType Conversion ---
   // Returns a new Tensor with the specified dtype, converting each element.
   // If already the target dtype, returns a view (no copy).
-  // Needed by:
-  //   - GGUF loader: F16 weights → F32 for compute
-  //   - Quantization: F32 activations → INT8
   Tensor to(DType target_dtype) const;
 
-  // --- Deep Copy (TODO: Implement!) ---
+  // --- Deep Copy ---
   // Returns a deep copy (new allocation, data copied).
   // Always returns a contiguous tensor regardless of source layout.
-  // Needed for residual connections (x + attn(norm(x))) and KV cache CoW.
   Tensor clone() const;
 
-  // --- Shape Manipulation (TODO: Implement!) ---
+  // --- Shape Manipulation ---
 
   // Select a single index along a dimension, returning an (N-1)D view.
   // Example: For embedding table [vocab, embed_dim]:
@@ -198,7 +177,6 @@ public:
 
 private:
   // Private constructor for creating views that share data.
-  // TODO: Add offset parameter so slice() can create offset views.
   Tensor(std::vector<int64_t> shape, std::vector<int64_t> strides, DType dtype,
          std::shared_ptr<uint8_t[]> data, int64_t offset = 0);
 
