@@ -37,3 +37,5 @@ MODULE.bazel.lock
 *.exe
 *.out
 *.app
+
+walkthrough

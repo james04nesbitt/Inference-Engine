@@ -13,7 +13,7 @@
 namespace ie {
 
 // GGUF format constants
-constexpr uint32_t kGGUFMagic = 0x46554747;  // "GGUF" in little-endian
+constexpr uint32_t kGGUFMagic = 0x46554747; // "GGUF" in little-endian
 constexpr uint32_t kGGUFVersion3 = 3;
 
 // ============================================================================
@@ -58,6 +58,14 @@ enum class GGMLType : uint32_t {
   // TODO: Add more as needed
 };
 
+// Convert GGMLType to our Tensor DType.
+// Throws for quantized types that are not yet supported.
+DType GGMLTypeToDType(GGMLType type);
+
+// Returns the number of bytes per element for a given GGMLType.
+// Only valid for non-block-quantized types (F32, F16).
+size_t GGMLTypeSize(GGMLType type);
+
 // ============================================================================
 // Parsed structures from a GGUF file
 // ============================================================================
@@ -82,7 +90,7 @@ struct GGUFTensorInfo {
   std::string name;
   std::vector<uint64_t> dimensions;
   GGMLType type;
-  uint64_t offset;  // Offset from start of tensor data section
+  uint64_t offset; // Offset from start of tensor data section
 };
 
 // ============================================================================
@@ -98,36 +106,36 @@ struct GGUFTensorInfo {
 //   Phase 4: Memory-map tensors for zero-copy loading (advanced)
 // ============================================================================
 class GGUFFile {
- public:
+public:
   GGUFFile() = default;
   ~GGUFFile() = default;
 
   // Opens and parses the GGUF file header and metadata.
   // Returns false on failure.
-  bool Open(const std::string& path);
+  bool Open(const std::string &path);
 
   // --- Accessors ---
-  const GGUFHeader& header() const { return header_; }
+  const GGUFHeader &header() const { return header_; }
 
   // Get a metadata value by key. Returns nullptr if not found.
-  const GGUFMetadataValue* GetMetadata(const std::string& key) const;
+  const GGUFMetadataValue *GetMetadata(const std::string &key) const;
 
   // Get string metadata (convenience).
-  std::string GetString(const std::string& key,
-                        const std::string& default_val = "") const;
+  std::string GetString(const std::string &key,
+                        const std::string &default_val = "") const;
 
   // Get integer metadata (convenience).
-  int64_t GetInt(const std::string& key, int64_t default_val = 0) const;
+  int64_t GetInt(const std::string &key, int64_t default_val = 0) const;
 
   // Get float metadata (convenience).
-  float GetFloat(const std::string& key, float default_val = 0.0f) const;
+  float GetFloat(const std::string &key, float default_val = 0.0f) const;
 
   // Get info about a specific tensor by name.
-  const GGUFTensorInfo* GetTensorInfo(const std::string& name) const;
+  const GGUFTensorInfo *GetTensorInfo(const std::string &name) const;
 
   // Load a tensor's data into a Tensor object.
   // TODO: Implement this — it's where binary parsing meets your Tensor class
-  Tensor LoadTensor(const std::string& name) const;
+  Tensor LoadTensor(const std::string &name) const;
 
   // List all tensor names.
   std::vector<std::string> TensorNames() const;
@@ -135,22 +143,22 @@ class GGUFFile {
   // Print a summary of the file contents.
   void PrintSummary() const;
 
- private:
+private:
   GGUFHeader header_{};
   std::map<std::string, GGUFMetadataValue> metadata_;
   std::map<std::string, GGUFTensorInfo> tensors_;
   std::string file_path_;
-  uint64_t tensor_data_offset_ = 0;  // Byte offset where tensor data starts
+  uint64_t tensor_data_offset_ = 0; // Byte offset where tensor data starts
 
   // --- Internal parsing helpers ---
   // TODO: Implement these
-  bool ReadHeader(std::ifstream& file);
-  bool ReadMetadata(std::ifstream& file);
-  bool ReadTensorInfos(std::ifstream& file);
+  bool ReadHeader(std::ifstream &file);
+  bool ReadMetadata(std::ifstream &file);
+  bool ReadTensorInfos(std::ifstream &file);
 
   // Low-level read helpers
-  std::string ReadString(std::ifstream& file);
-  GGUFMetadataValue ReadValue(std::ifstream& file, GGUFValueType type);
+  std::string ReadString(std::ifstream &file);
+  GGUFMetadataValue ReadValue(std::ifstream &file, GGUFValueType type);
 };
 
-}  // namespace ie
+} // namespace ie
