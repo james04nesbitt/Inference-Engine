@@ -1,4 +1,4 @@
-load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_test")
 
 cc_library(
     name = "gguf",
@@ -16,5 +16,13 @@ cc_test(
     deps = [
         ":gguf",
         "@googletest//:gtest_main",
+    ],
+)
+
+cc_binary(
+    name = "load_model_test",
+    srcs = ["load_model_test.cc"],
+    deps = [
+        ":gguf",
     ],
 )
