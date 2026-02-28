@@ -1,7 +1,6 @@
 #include "engine/ops/ops.h"
 
 #include <cmath>
-#include <limits>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -433,6 +432,121 @@ TEST(OpsTest, EmbeddingNegativeIndexThrows) {
   Tensor table({4, 3});
   Tensor indices = Tensor::from_vector({-1.0f});
   EXPECT_THROW(embedding(table, indices), std::runtime_error);
+}
+
+// ============================================================================
+// Multi-dtype support — FP16 inputs/outputs
+// ============================================================================
+
+TEST(OpsTest, AddFloat16) {
+  Tensor a({3}, DType::kFloat16);
+  Tensor b({3}, DType::kFloat16);
+  a.set({0}, 1.0f);
+  a.set({1}, 2.0f);
+  a.set({2}, 3.0f);
+  b.set({0}, 4.0f);
+  b.set({1}, 5.0f);
+  b.set({2}, 6.0f);
+
+  Tensor c = add(a, b);
+  EXPECT_EQ(c.dtype(), DType::kFloat16); // output should preserve dtype
+  EXPECT_NEAR(c.at({0}), 5.0f, 0.01f);
+  EXPECT_NEAR(c.at({1}), 7.0f, 0.01f);
+  EXPECT_NEAR(c.at({2}), 9.0f, 0.01f);
+}
+
+TEST(OpsTest, MulFloat16) {
+  Tensor a({2}, DType::kFloat16);
+  Tensor b({2}, DType::kFloat16);
+  a.set({0}, 2.0f);
+  a.set({1}, 3.0f);
+  b.set({0}, 4.0f);
+  b.set({1}, 5.0f);
+
+  Tensor c = mul(a, b);
+  EXPECT_EQ(c.dtype(), DType::kFloat16);
+  EXPECT_NEAR(c.at({0}), 8.0f, 0.01f);
+  EXPECT_NEAR(c.at({1}), 15.0f, 0.01f);
+}
+
+TEST(OpsTest, MatmulFloat16) {
+  // FP16 matmul: compute in FP32, output as FP16
+  Tensor a({2, 2}, DType::kFloat16);
+  a.set({0, 0}, 1.0f);
+  a.set({0, 1}, 2.0f);
+  a.set({1, 0}, 3.0f);
+  a.set({1, 1}, 4.0f);
+
+  Tensor b({2, 2}, DType::kFloat16);
+  b.set({0, 0}, 5.0f);
+  b.set({0, 1}, 6.0f);
+  b.set({1, 0}, 7.0f);
+  b.set({1, 1}, 8.0f);
+
+  Tensor c = matmul(a, b);
+  EXPECT_EQ(c.dtype(), DType::kFloat16);
+  EXPECT_NEAR(c.at({0, 0}), 19.0f, 0.1f);
+  EXPECT_NEAR(c.at({0, 1}), 22.0f, 0.1f);
+  EXPECT_NEAR(c.at({1, 0}), 43.0f, 0.1f);
+  EXPECT_NEAR(c.at({1, 1}), 50.0f, 0.1f);
+}
+
+TEST(OpsTest, SiluFloat16) {
+  Tensor x({2}, DType::kFloat16);
+  x.set({0}, 1.0f);
+  x.set({1}, 0.0f);
+
+  Tensor out = silu(x);
+  EXPECT_EQ(out.dtype(), DType::kFloat16);
+  EXPECT_NEAR(out.at({0}), 0.7311f, 0.01f);
+  EXPECT_NEAR(out.at({1}), 0.0f, 0.01f);
+}
+
+TEST(OpsTest, SoftmaxFloat16) {
+  Tensor x({3}, DType::kFloat16);
+  x.set({0}, 1.0f);
+  x.set({1}, 1.0f);
+  x.set({2}, 1.0f);
+
+  Tensor out = softmax(x);
+  EXPECT_EQ(out.dtype(), DType::kFloat16);
+  for (int64_t i = 0; i < 3; ++i) {
+    EXPECT_NEAR(out.at({i}), 1.0f / 3.0f, 0.01f);
+  }
+}
+
+TEST(OpsTest, RmsNormFloat16) {
+  Tensor x({2}, DType::kFloat16);
+  x.set({0}, 2.0f);
+  x.set({1}, 2.0f);
+  Tensor w = Tensor::ones({2}, DType::kFloat16);
+
+  Tensor out = rms_norm(x, w);
+  EXPECT_EQ(out.dtype(), DType::kFloat16);
+  // rms = sqrt(4 + 1e-6) ≈ 2.0, output ≈ [1, 1]
+  EXPECT_NEAR(out.at({0}), 1.0f, 0.01f);
+  EXPECT_NEAR(out.at({1}), 1.0f, 0.01f);
+}
+
+TEST(OpsTest, EmbeddingFloat16Table) {
+  // FP16 embedding table — common in GGUF models
+  Tensor table({3, 2}, DType::kFloat16);
+  table.set({0, 0}, 1.0f);
+  table.set({0, 1}, 2.0f);
+  table.set({1, 0}, 3.0f);
+  table.set({1, 1}, 4.0f);
+  table.set({2, 0}, 5.0f);
+  table.set({2, 1}, 6.0f);
+
+  Tensor indices = Tensor::from_vector({1.0f, 2.0f});
+  Tensor out = embedding(table, indices);
+
+  EXPECT_EQ(out.dtype(), DType::kFloat16); // preserves table dtype
+  EXPECT_TRUE(out.shape_equals({2, 2}));
+  EXPECT_NEAR(out.at({0, 0}), 3.0f, 0.01f); // table[1]
+  EXPECT_NEAR(out.at({0, 1}), 4.0f, 0.01f);
+  EXPECT_NEAR(out.at({1, 0}), 5.0f, 0.01f); // table[2]
+  EXPECT_NEAR(out.at({1, 1}), 6.0f, 0.01f);
 }
 
 } // namespace

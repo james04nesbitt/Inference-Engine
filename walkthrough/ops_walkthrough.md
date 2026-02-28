@@ -184,21 +184,44 @@ Tensor embeddings = ops::embedding(table, tokens); // [3, 1152]
 
 ---
 
+## Multi-Dtype Support
+
+All ops support **FP32, FP16, and INT8** tensors via upcast/downcast (Option A):
+
+```cpp
+DType out_dtype = x.dtype();                    // remember original dtype
+Tensor x_f = x.to(DType::kFloat32).contiguous(); // upcast to FP32
+// ... all computation happens in FP32 ...
+return out.to(out_dtype);                        // convert back
+```
+
+**Why this approach?**
+- **Simplicity**: One code path handles all dtypes — no template specialization needed
+- **Accuracy**: FP32 computation avoids FP16 overflow/underflow during intermediate steps (e.g., `exp()` in softmax)
+- **Correctness**: The Tensor class `.to()` already handles all conversions via `HalfToFloat`/`FloatToHalf`
+- **Real-world match**: This is exactly what PyTorch does on CPU for most ops
+
+**When to upgrade to Option B** (per-dtype kernels):
+Once Highway SIMD is enabled, write specialized FP16 kernels — Highway has native `float16_t` support and can process 16 FP16 values per AVX-512 instruction vs 8 FP32 values.
+
+---
+
 ## Test Summary
 
-All 31 tests pass:
+All 38 tests pass:
 
 | Operation | Tests | What's Covered |
 |-----------|-------|----------------|
-| `add` | 3 | basic, 2D, shape mismatch |
-| `mul` | 2 | basic, shape mismatch |
-| `matmul` | 5 | identity multiply, known 2×2, non-square, inner dim mismatch, non-2D throw |
-| `rms_norm` | 4 | basic, weight scaling, 2D (row-wise), weight size mismatch |
-| `silu` | 2 | zero, known values |
+| `add` | 3 + 1 FP16 | basic, 2D, shape mismatch, FP16 round-trip |
+| `mul` | 2 + 1 FP16 | basic, shape mismatch, FP16 round-trip |
+| `matmul` | 5 + 1 FP16 | identity multiply, known 2×2, non-square, dim mismatch, non-2D, FP16 |
+| `rms_norm` | 4 + 1 FP16 | basic, weight scaling, 2D, weight mismatch, FP16 |
+| `silu` | 2 + 1 FP16 | zero, known values, FP16 |
 | `gelu` | 2 | zero, known values |
-| `softmax` | 6 | uniform, sums-to-1, monotonic, numerical stability, 2D dim=1, 2D dim=0 |
-| `rope` | 4 | norm preservation, position-0 identity, odd head_dim throw, batch mismatch throw |
-| `embedding` | 3 | basic lookup, out-of-bounds throw, negative index throw |
+| `softmax` | 6 + 1 FP16 | uniform, sums-to-1, monotonic, numerical stability, 2D, FP16 |
+| `rope` | 4 | norm preservation, position-0 identity, odd head_dim, batch mismatch |
+| `embedding` | 3 + 1 FP16 | basic lookup, out-of-bounds, negative index, FP16 table |
+
 
 ```bash
 # Run all ops tests

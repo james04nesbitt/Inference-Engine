@@ -1,7 +1,7 @@
 #include "engine/ops/ops.h"
 
-#include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <stdexcept>
 #include <vector>
 
@@ -16,37 +16,39 @@ Tensor add(const Tensor &a, const Tensor &b) {
   if (!a.shape_equals(b)) {
     throw std::runtime_error("add: shapes are not equal");
   }
-  // contiguous() returns a NEW tensor — must capture the result.
-  Tensor a_c = a.contiguous();
-  Tensor b_c = b.contiguous();
-  Tensor c = Tensor::zeros(a_c.shape(), a_c.dtype());
+  // Upcast to FP32 for computation, then convert back.
+  DType out_dtype = a.dtype();
+  Tensor a_f = a.to(DType::kFloat32).contiguous();
+  Tensor b_f = b.to(DType::kFloat32).contiguous();
+  Tensor c = Tensor::zeros(a_f.shape(), DType::kFloat32);
 
-  const float *a_data = a_c.data<float>();
-  const float *b_data = b_c.data<float>();
+  const float *a_data = a_f.data<float>();
+  const float *b_data = b_f.data<float>();
   float *c_data = c.data<float>();
 
-  for (int64_t i = 0; i < a_c.numel(); ++i) {
+  for (int64_t i = 0; i < a_f.numel(); ++i) {
     c_data[i] = a_data[i] + b_data[i];
   }
-  return c;
+  return c.to(out_dtype);
 }
 
 Tensor mul(const Tensor &a, const Tensor &b) {
   if (!a.shape_equals(b)) {
     throw std::runtime_error("mul: shapes are not equal");
   }
-  Tensor a_c = a.contiguous();
-  Tensor b_c = b.contiguous();
-  Tensor c = Tensor::zeros(a_c.shape(), a_c.dtype());
+  DType out_dtype = a.dtype();
+  Tensor a_f = a.to(DType::kFloat32).contiguous();
+  Tensor b_f = b.to(DType::kFloat32).contiguous();
+  Tensor c = Tensor::zeros(a_f.shape(), DType::kFloat32);
 
-  const float *a_data = a_c.data<float>();
-  const float *b_data = b_c.data<float>();
+  const float *a_data = a_f.data<float>();
+  const float *b_data = b_f.data<float>();
   float *c_data = c.data<float>();
 
-  for (int64_t i = 0; i < a_c.numel(); ++i) {
+  for (int64_t i = 0; i < a_f.numel(); ++i) {
     c_data[i] = a_data[i] * b_data[i];
   }
-  return c;
+  return c.to(out_dtype);
 }
 
 // ============================================================================
@@ -79,12 +81,14 @@ Tensor matmul(const Tensor &a, const Tensor &b) {
   const int64_t K = a.size(1);
   const int64_t N = b.size(1);
 
-  Tensor a_c = a.contiguous();
-  Tensor b_c = b.contiguous();
+  // Always compute in FP32 for numerical accuracy, convert output back.
+  DType out_dtype = a.dtype();
+  Tensor a_f = a.to(DType::kFloat32).contiguous();
+  Tensor b_f = b.to(DType::kFloat32).contiguous();
   Tensor c = Tensor::zeros({M, N}, DType::kFloat32);
 
-  const float *A = a_c.data<float>();
-  const float *B = b_c.data<float>();
+  const float *A = a_f.data<float>();
+  const float *B = b_f.data<float>();
   float *C = c.data<float>();
 
   // Cache-friendly i,k,j loop order:
@@ -98,7 +102,7 @@ Tensor matmul(const Tensor &a, const Tensor &b) {
       }
     }
   }
-  return c;
+  return c.to(out_dtype);
 }
 
 // ============================================================================
@@ -123,16 +127,17 @@ Tensor rms_norm(const Tensor &x, const Tensor &weight, float eps) {
     throw std::runtime_error("rms_norm: weight shape must match last dim of x");
   }
 
-  Tensor x_c = x.contiguous();
-  Tensor w_c = weight.contiguous();
-  Tensor out = Tensor::zeros(x_c.shape(), x_c.dtype());
+  DType out_dtype = x.dtype();
+  Tensor x_f = x.to(DType::kFloat32).contiguous();
+  Tensor w_f = weight.to(DType::kFloat32).contiguous();
+  Tensor out = Tensor::zeros(x_f.shape(), DType::kFloat32);
 
-  const float *x_data = x_c.data<float>();
-  const float *w_data = w_c.data<float>();
+  const float *x_data = x_f.data<float>();
+  const float *w_data = w_f.data<float>();
   float *o_data = out.data<float>();
 
   // Number of "rows" = total elements / last_dim
-  const int64_t n_rows = x_c.numel() / last_dim;
+  const int64_t n_rows = x_f.numel() / last_dim;
 
   for (int64_t row = 0; row < n_rows; ++row) {
     const float *x_row = x_data + row * last_dim;
@@ -151,7 +156,7 @@ Tensor rms_norm(const Tensor &x, const Tensor &weight, float eps) {
       o_row[j] = x_row[j] * inv_rms * w_data[j];
     }
   }
-  return out;
+  return out.to(out_dtype);
 }
 
 // ============================================================================
@@ -163,18 +168,19 @@ Tensor rms_norm(const Tensor &x, const Tensor &weight, float eps) {
 // Used in Gemma's SwiGLU FFN: FFN(x) = silu(W_gate @ x) * (W_up @ x)
 
 Tensor silu(const Tensor &x) {
-  Tensor x_c = x.contiguous();
-  Tensor out = Tensor::zeros(x_c.shape(), x_c.dtype());
+  DType out_dtype = x.dtype();
+  Tensor x_f = x.to(DType::kFloat32).contiguous();
+  Tensor out = Tensor::zeros(x_f.shape(), DType::kFloat32);
 
-  const float *x_data = x_c.data<float>();
+  const float *x_data = x_f.data<float>();
   float *o_data = out.data<float>();
 
-  for (int64_t i = 0; i < x_c.numel(); ++i) {
+  for (int64_t i = 0; i < x_f.numel(); ++i) {
     float val = x_data[i];
     float sigmoid = 1.0f / (1.0f + std::exp(-val));
     o_data[i] = val * sigmoid;
   }
-  return out;
+  return out.to(out_dtype);
 }
 
 // ============================================================================
@@ -185,21 +191,22 @@ Tensor silu(const Tensor &x) {
 //   gelu(x) = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
 
 Tensor gelu(const Tensor &x) {
-  Tensor x_c = x.contiguous();
-  Tensor out = Tensor::zeros(x_c.shape(), x_c.dtype());
+  DType out_dtype = x.dtype();
+  Tensor x_f = x.to(DType::kFloat32).contiguous();
+  Tensor out = Tensor::zeros(x_f.shape(), DType::kFloat32);
 
-  const float *x_data = x_c.data<float>();
+  const float *x_data = x_f.data<float>();
   float *o_data = out.data<float>();
 
   constexpr float kSqrt2OverPi = 0.7978845608028654f; // sqrt(2/pi)
   constexpr float kCoeff = 0.044715f;
 
-  for (int64_t i = 0; i < x_c.numel(); ++i) {
+  for (int64_t i = 0; i < x_f.numel(); ++i) {
     float val = x_data[i];
     float inner = kSqrt2OverPi * (val + kCoeff * val * val * val);
     o_data[i] = 0.5f * val * (1.0f + std::tanh(inner));
   }
-  return out;
+  return out.to(out_dtype);
 }
 
 // ============================================================================
@@ -228,10 +235,11 @@ Tensor softmax(const Tensor &x, int64_t dim) {
     throw std::runtime_error("softmax: dim out of range");
   }
 
-  Tensor x_c = x.contiguous();
-  Tensor out = Tensor::zeros(x_c.shape(), x_c.dtype());
+  DType out_dtype = x.dtype();
+  Tensor x_f = x.to(DType::kFloat32).contiguous();
+  Tensor out = Tensor::zeros(x_f.shape(), DType::kFloat32);
 
-  const auto &shape = x_c.shape();
+  const auto &shape = x_f.shape();
   const int64_t dim_size = shape[dim];
 
   // Compute the number of independent softmax operations.
@@ -242,11 +250,11 @@ Tensor softmax(const Tensor &x, int64_t dim) {
     outer_size *= shape[d];
   }
   int64_t inner_size = 1;
-  for (int64_t d = dim + 1; d < x_c.ndim(); ++d) {
+  for (int64_t d = dim + 1; d < x_f.ndim(); ++d) {
     inner_size *= shape[d];
   }
 
-  const float *x_data = x_c.data<float>();
+  const float *x_data = x_f.data<float>();
   float *o_data = out.data<float>();
 
   for (int64_t outer = 0; outer < outer_size; ++outer) {
@@ -278,7 +286,7 @@ Tensor softmax(const Tensor &x, int64_t dim) {
       }
     }
   }
-  return out;
+  return out.to(out_dtype);
 }
 
 // ============================================================================
@@ -320,12 +328,13 @@ Tensor rope(const Tensor &x, const Tensor &positions, float freq_base) {
   const int64_t head_dim = x.size(3);
   const int64_t half_dim = head_dim / 2;
 
-  Tensor x_c = x.contiguous();
-  Tensor pos_c = positions.contiguous();
-  Tensor out = Tensor::zeros(x_c.shape(), x_c.dtype());
+  DType out_dtype = x.dtype();
+  Tensor x_f = x.to(DType::kFloat32).contiguous();
+  Tensor pos_f = positions.to(DType::kFloat32).contiguous();
+  Tensor out = Tensor::zeros(x_f.shape(), DType::kFloat32);
 
-  const float *x_data = x_c.data<float>();
-  const float *pos_data = pos_c.data<float>();
+  const float *x_data = x_f.data<float>();
+  const float *pos_data = pos_f.data<float>();
   float *o_data = out.data<float>();
 
   // Precompute inverse frequencies: freq_base^(-2i/head_dim) for i in [0,
@@ -357,7 +366,7 @@ Tensor rope(const Tensor &x, const Tensor &positions, float freq_base) {
       }
     }
   }
-  return out;
+  return out.to(out_dtype);
 }
 
 // ============================================================================
@@ -383,12 +392,15 @@ Tensor embedding(const Tensor &table, const Tensor &indices) {
   const int64_t embed_dim = table.size(1);
   const int64_t n_tokens = indices.size(0);
 
-  Tensor table_c = table.contiguous();
-  Tensor idx_c = indices.contiguous();
-  Tensor out = Tensor::zeros({n_tokens, embed_dim}, table_c.dtype());
+  // Upcast table to FP32 for computation. Indices are read as float and
+  // cast to int64, so they work regardless of storage dtype.
+  DType out_dtype = table.dtype();
+  Tensor table_f = table.to(DType::kFloat32).contiguous();
+  Tensor idx_f = indices.to(DType::kFloat32).contiguous();
+  Tensor out = Tensor::zeros({n_tokens, embed_dim}, DType::kFloat32);
 
-  const float *t_data = table_c.data<float>();
-  const float *i_data = idx_c.data<float>();
+  const float *t_data = table_f.data<float>();
+  const float *i_data = idx_f.data<float>();
   float *o_data = out.data<float>();
 
   for (int64_t t = 0; t < n_tokens; ++t) {
@@ -404,7 +416,7 @@ Tensor embedding(const Tensor &table, const Tensor &indices) {
     float *dst = o_data + t * embed_dim;
     std::memcpy(dst, src, static_cast<size_t>(embed_dim) * sizeof(float));
   }
-  return out;
+  return out.to(out_dtype);
 }
 
 } // namespace ops
