@@ -1,4 +1,4 @@
-load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 
 cc_library(
     name = "ops",
@@ -7,5 +7,14 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "//engine/tensor",
+    ],
+)
+
+cc_test(
+    name = "ops_test",
+    srcs = ["ops_test.cc"],
+    deps = [
+        ":ops",
+        "@googletest//:gtest_main",
     ],
 )
