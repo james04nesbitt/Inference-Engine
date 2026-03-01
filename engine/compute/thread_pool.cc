@@ -20,12 +20,12 @@ ThreadPool::ThreadPool(size_t num_threads) {
   //   4. Unlock and execute the task
   //   5. Repeat
   //
-  // Use std::jthread so threads auto-join on destruction.
+  // Use std::thread. We will manually join them in the destructor.
   //
   // workers_.reserve(num_threads);
   // for (size_t i = 0; i < num_threads; ++i) {
-  //   workers_.emplace_back([this](std::stop_token st) {
-  //     while (!st.stop_requested()) {
+  //   workers_.emplace_back([this]() {
+  //     while (true) {
   //       std::function<void()> task;
   //       {
   //         std::unique_lock lock(mutex_);
@@ -47,8 +47,9 @@ ThreadPool::~ThreadPool() {
   //     stop_ = true;
   //   }
   //   cv_.notify_all();
-  //   // std::jthread auto-joins, but we need to request stop
-  //   for (auto& w : workers_) w.request_stop();
+  //   for (auto& w : workers_) {
+  //     if (w.joinable()) w.join();
+  //   }
 }
 
 std::future<void> ThreadPool::Submit(std::function<void()> task) {

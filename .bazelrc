@@ -9,11 +9,16 @@ common --incompatible_autoload_externally=cc_library,cc_binary,cc_test,cc_proto_
 #   - MSVC (Windows):       /std:c++20
 #   - Clang/GCC (macOS):    -std=c++20
 #
-# We set BOTH flags. Each compiler silently ignores the flag it doesn't
-# understand (with a warning), so this is safe for cross-platform builds.
-# =============================================================================
-build --cxxopt=-std=c++20 --host_cxxopt=-std=c++20
-build --cxxopt=/std:c++20 --host_cxxopt=/std:c++20
+# We use platform-specific config to handle different compilers.
+# --enable_platform_specific_config auto-selects --config=macos, --config=windows, etc.
+build --enable_platform_specific_config
+
+# Default to Clang/GCC flags
+# Require newer macOS to support C++20 features like std::jthread and std::filesystem
+build --cxxopt=-std=c++20 --host_cxxopt=-std=c++20 --macos_minimum_os=14.0
+
+# Overrides for Windows/MSVC
+build:windows --cxxopt=/std:c++20 --host_cxxopt=/std:c++20
 
 # Optimizations for release builds
 build:release --compilation_mode=opt
@@ -33,3 +38,5 @@ test --test_output=errors
 # =============================================================================
 build:avx2 --cxxopt=-march=native --host_cxxopt=-march=native
 build:avx2 --cxxopt=/arch:AVX2 --host_cxxopt=/arch:AVX2
+
+build:neon --cxxopt=-mcpu=apple-m1 --host_cxxopt=-mcpu=apple-m1

@@ -70,6 +70,10 @@ Tensor::Tensor(std::vector<int64_t> shape, DType dtype)
   size_t alloc_size = nbytes();
   if (alloc_size == 0)
     alloc_size = kAlignment;
+
+  // macOS std::aligned_alloc strictly requires size to be a multiple of alignment
+  alloc_size = (alloc_size + kAlignment - 1) & ~(kAlignment - 1);
+
 #ifdef _WIN32
   void *raw = _aligned_malloc(alloc_size, kAlignment);
 #else
@@ -208,7 +212,8 @@ absl::optional<Tensor> Tensor::view(std::vector<int64_t> new_shape) const {
   if (new_numel != numel()) {
     return absl::nullopt;
   }
-  return Tensor(std::move(new_shape), internal::ComputeStrides(new_shape),
+  auto strides = internal::ComputeStrides(new_shape);
+  return Tensor(std::move(new_shape), std::move(strides),
                 dtype_, data_, offset_);
 }
 
@@ -378,7 +383,8 @@ const std::vector<int32_t> &Tensor::zero_points() const { return zero_points_; }
 
 Tensor Tensor::from_buffer(std::shared_ptr<uint8_t[]> data,
                            std::vector<int64_t> shape, DType dtype) {
-  return Tensor(std::move(shape), internal::ComputeStrides(shape), dtype,
+  auto strides = internal::ComputeStrides(shape);
+  return Tensor(std::move(shape), std::move(strides), dtype,
                 std::move(data));
 }
 

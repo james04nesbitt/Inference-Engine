@@ -59,7 +59,7 @@ class ThreadPool {
   size_t NumThreads() const { return workers_.size(); }
 
  private:
-  std::vector<std::jthread> workers_;
+  std::vector<std::thread> workers_;
   std::queue<std::function<void()>> tasks_;
   std::mutex mutex_;
   std::condition_variable cv_;
