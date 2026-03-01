@@ -1,4 +1,4 @@
-load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 
 cc_library(
     name = "tokenizer",
@@ -10,4 +10,13 @@ cc_library(
         "tokenizer.h",
     ],
     visibility = ["//visibility:public"],
+)
+
+cc_test(
+    name = "bpe_tokenizer_test",
+    srcs = ["bpe_tokenizer_test.cc"],
+    deps = [
+        ":tokenizer",
+        "@googletest//:gtest_main",
+    ],
 )

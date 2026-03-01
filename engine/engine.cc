@@ -3,9 +3,11 @@
 #include <iostream>
 #include <stdexcept>
 
+#include "engine/tokenizer/bpe_tokenizer.h"
+
 namespace ie {
 
-bool InferenceEngine::LoadModel(const std::string& model_path) {
+bool InferenceEngine::LoadModel(const std::string &model_path) {
   std::cout << "Loading model from: " << model_path << std::endl;
 
   // Step 1: Parse the GGUF file
@@ -32,7 +34,7 @@ bool InferenceEngine::LoadModel(const std::string& model_path) {
   return true;
 }
 
-std::string InferenceEngine::Generate(const std::string& prompt,
+std::string InferenceEngine::Generate(const std::string &prompt,
                                       int32_t max_tokens) {
   // TODO: Implement the autoregressive generation loop
   //
@@ -75,34 +77,56 @@ bool InferenceEngine::BuildModel() {
 }
 
 bool InferenceEngine::BuildTokenizer() {
-  // TODO: Implement tokenizer construction from GGUF metadata
-  //
-  // The GGUF file stores tokenizer data under these keys:
-  //   tokenizer.ggml.model       -> "llama" (SentencePiece BPE)
-  //   tokenizer.ggml.tokens      -> array of token strings
-  //   tokenizer.ggml.scores      -> array of float scores
-  //   tokenizer.ggml.bos_token_id -> int
-  //   tokenizer.ggml.eos_token_id -> int
-  //   tokenizer.ggml.padding_token_id -> int
-  //
-  // Once you've parsed these from metadata (in ReadMetadata):
-  //   auto tokens = std::get<std::vector<std::string>>(
-  //       *gguf_.GetMetadata("tokenizer.ggml.tokens"));
-  //   auto scores = std::get<std::vector<float>>(
-  //       *gguf_.GetMetadata("tokenizer.ggml.scores"));
-  //   tokenizer_ = std::make_unique<BPETokenizer>(tokens, scores, bos, eos, pad);
+  // Extract vocabulary tokens from GGUF metadata.
+  auto *tokens_val = gguf_.GetMetadata("tokenizer.ggml.tokens");
+  if (!tokens_val) {
+    std::cerr << "BuildTokenizer: missing tokenizer.ggml.tokens" << std::endl;
+    return false;
+  }
+  auto *vocab = std::get_if<std::vector<std::string>>(tokens_val);
+  if (!vocab) {
+    std::cerr << "BuildTokenizer: tokenizer.ggml.tokens is not a string array"
+              << std::endl;
+    return false;
+  }
 
-  std::cerr << "BuildTokenizer: NOT YET IMPLEMENTED" << std::endl;
-  return false;
+  // Extract scores.
+  auto *scores_val = gguf_.GetMetadata("tokenizer.ggml.scores");
+  if (!scores_val) {
+    std::cerr << "BuildTokenizer: missing tokenizer.ggml.scores" << std::endl;
+    return false;
+  }
+  auto *scores = std::get_if<std::vector<float>>(scores_val);
+  if (!scores) {
+    std::cerr << "BuildTokenizer: tokenizer.ggml.scores is not a float array"
+              << std::endl;
+    return false;
+  }
+
+  // Extract special token IDs (with reasonable defaults).
+  int32_t bos_id =
+      static_cast<int32_t>(gguf_.GetInt("tokenizer.ggml.bos_token_id", 2));
+  int32_t eos_id =
+      static_cast<int32_t>(gguf_.GetInt("tokenizer.ggml.eos_token_id", 1));
+  int32_t pad_id =
+      static_cast<int32_t>(gguf_.GetInt("tokenizer.ggml.padding_token_id", 0));
+
+  tokenizer_ =
+      std::make_unique<BPETokenizer>(*vocab, *scores, bos_id, eos_id, pad_id);
+
+  std::cout << "Tokenizer built: " << tokenizer_->VocabSize() << " tokens"
+            << ", BOS=" << bos_id << ", EOS=" << eos_id << ", PAD=" << pad_id
+            << std::endl;
+  return true;
 }
 
-int32_t InferenceEngine::SampleGreedy(const Tensor& logits) const {
+int32_t InferenceEngine::SampleGreedy(const Tensor &logits) const {
   // TODO: Return the index of the maximum logit value
   // This is argmax — the simplest sampling strategy.
   throw std::runtime_error("SampleGreedy not implemented yet");
 }
 
-int32_t InferenceEngine::SampleTopK(const Tensor& logits, int32_t k,
+int32_t InferenceEngine::SampleTopK(const Tensor &logits, int32_t k,
                                     float temperature) const {
   // TODO: Top-K sampling
   //   1. Divide logits by temperature
@@ -112,7 +136,7 @@ int32_t InferenceEngine::SampleTopK(const Tensor& logits, int32_t k,
   throw std::runtime_error("SampleTopK not implemented yet");
 }
 
-int32_t InferenceEngine::SampleTopP(const Tensor& logits, float p,
+int32_t InferenceEngine::SampleTopP(const Tensor &logits, float p,
                                     float temperature) const {
   // TODO: Nucleus (top-p) sampling
   //   1. Divide logits by temperature
@@ -122,4 +146,4 @@ int32_t InferenceEngine::SampleTopP(const Tensor& logits, float p,
   throw std::runtime_error("SampleTopP not implemented yet");
 }
 
-}  // namespace ie
+} // namespace ie
