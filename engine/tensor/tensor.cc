@@ -8,6 +8,8 @@
 #include <stdexcept>
 #include <vector>
 
+#include "hwy/highway.h"
+
 namespace ie {
 namespace internal {
 
