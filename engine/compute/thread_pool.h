@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+#include <condition_variable>
 #include <cstddef>
 #include <functional>
 #include <future>
@@ -35,7 +37,6 @@ class ThreadPool {
   ~ThreadPool();
 
   // Submit a task for execution. Returns a future for the result.
-  // TODO: Implement the work queue + notification mechanism.
   std::future<void> Submit(std::function<void()> task);
 
   // Execute `func(i)` for i in [0, count) in parallel across the pool.
@@ -63,7 +64,10 @@ class ThreadPool {
   std::queue<std::function<void()>> tasks_;
   std::mutex mutex_;
   std::condition_variable cv_;
-  bool stop_ = false;
+  
+  // Track tasks queued vs completed to avoid waiting on empty futures inline
+  std::atomic<int> active_tasks_{0};
+  std::atomic<bool> stop_{false};
 };
 
 }  // namespace compute

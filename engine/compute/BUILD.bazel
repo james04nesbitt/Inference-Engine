@@ -1,4 +1,4 @@
-load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 
 cc_library(
     name = "compute",
@@ -14,5 +14,14 @@ cc_library(
     deps = [
         "//engine/tensor",
         "@highway//:hwy",
+    ],
+)
+
+cc_test(
+    name = "thread_pool_test",
+    srcs = ["thread_pool_test.cc"],
+    deps = [
+        ":compute",
+        "@googletest//:gtest_main",
     ],
 )
