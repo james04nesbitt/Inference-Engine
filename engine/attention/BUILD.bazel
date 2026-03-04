@@ -1,4 +1,4 @@
-load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 
 cc_library(
     name = "attention",
@@ -13,5 +13,14 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "//engine/tensor",
+    ],
+)
+
+cc_test(
+    name = "kv_cache_test",
+    srcs = ["kv_cache_test.cc"],
+    deps = [
+        ":attention",
+        "@googletest//:gtest_main",
     ],
 )

@@ -1,4 +1,4 @@
-load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 
 cc_library(
     name = "model",
@@ -11,5 +11,16 @@ cc_library(
     deps = [
         "//engine/ops",
         "//engine/tensor",
+    ],
+)
+
+cc_test(
+    name = "layers_test",
+    srcs = ["layers_test.cc"],
+    deps = [
+        ":model",
+        "//engine/ops",
+        "//engine/tensor",
+        "@googletest//:gtest_main",
     ],
 )

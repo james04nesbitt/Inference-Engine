@@ -10,6 +10,7 @@ cc_library(
         "simd_kernels.h",
         "thread_pool.h",
     ],
+    defines = ["HWY_STATIC_DEFINE"],
     visibility = ["//visibility:public"],
     deps = [
         "//engine/tensor",
@@ -23,5 +24,15 @@ cc_test(
     deps = [
         ":compute",
         "@googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "simd_kernels_test",
+    srcs = ["simd_kernels_test.cc"],
+    deps = [
+        ":compute",
+        "@googletest//:gtest_main",
+        "@highway//:hwy",
     ],
 )

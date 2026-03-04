@@ -1,150 +1,268 @@
 #include "engine/compute/simd_kernels.h"
 
 #include <cmath>
-#include <stdexcept>
+
+// On Windows/MSVC, Highway's BCR BUILD sets HWY_SHARED_DEFINE which adds
+// __declspec(dllimport) to function declarations. Since Bazel links statically,
+// we must override this before including any Highway headers.
+#ifdef HWY_SHARED_DEFINE
+#undef HWY_SHARED_DEFINE
+#endif
+#ifndef HWY_STATIC_DEFINE
+#define HWY_STATIC_DEFINE
+#endif
+
+// Highway headers — must be included in this specific order.
+#undef HWY_TARGET_INCLUDE
+#define HWY_TARGET_INCLUDE "engine/compute/simd_kernels.cc"
+#include "hwy/foreach_target.h" // Must come before highway.h
+#include "hwy/highway.h"
+
+HWY_BEFORE_NAMESPACE();
+
+namespace ie {
+namespace compute {
+namespace HWY_NAMESPACE {
+
+namespace hn = hwy::HWY_NAMESPACE;
+
+// --- Dot Product (Highway SIMD) ---
+float SimdDotProductImpl(const float *a, const float *b, int64_t n) {
+  const hn::ScalableTag<float> d;
+  const int64_t lanes = static_cast<int64_t>(hn::Lanes(d));
+  auto sum = hn::Zero(d);
+
+  int64_t i = 0;
+  for (; i + lanes <= n; i += lanes) {
+    auto va = hn::Load(d, a + i);
+    auto vb = hn::Load(d, b + i);
+    sum = hn::MulAdd(va, vb, sum);
+  }
+  float result = hn::ReduceSum(d, sum);
+
+  // Scalar remainder.
+  for (; i < n; ++i) {
+    result += a[i] * b[i];
+  }
+  return result;
+}
+
+// --- GEMM: Cache-friendly i,k,j with SIMD inner loop ---
+void SimdGemmImpl(const float *a, const float *b, float *c, int64_t M,
+                  int64_t N, int64_t K) {
+  const hn::ScalableTag<float> d;
+  const int64_t lanes = static_cast<int64_t>(hn::Lanes(d));
+
+  // Zero the output matrix.
+  for (int64_t i = 0; i < M * N; ++i) {
+    c[i] = 0.0f;
+  }
+
+  // Cache-friendly i,k,j order with SIMD inner loop.
+  for (int64_t i = 0; i < M; ++i) {
+    for (int64_t k = 0; k < K; ++k) {
+      const auto a_ik = hn::Set(d, a[i * K + k]);
+      const float *b_row = b + k * N;
+      float *c_row = c + i * N;
+
+      int64_t j = 0;
+      for (; j + lanes <= N; j += lanes) {
+        auto cv = hn::Load(d, c_row + j);
+        auto bv = hn::Load(d, b_row + j);
+        cv = hn::MulAdd(a_ik, bv, cv);
+        hn::Store(cv, d, c_row + j);
+      }
+      // Scalar remainder.
+      float a_ik_s = a[i * K + k];
+      for (; j < N; ++j) {
+        c_row[j] += a_ik_s * b_row[j];
+      }
+    }
+  }
+}
+
+// --- GEMV: Matrix-vector multiply (SIMD via dot product) ---
+void SimdGemvImpl(const float *a, const float *x, float *y, int64_t M,
+                  int64_t K) {
+  for (int64_t i = 0; i < M; ++i) {
+    y[i] = SimdDotProductImpl(a + i * K, x, K);
+  }
+}
+
+// --- Softmax: Numerically stable (SIMD) ---
+void SimdSoftmaxImpl(const float *input, float *output, int64_t n) {
+  const hn::ScalableTag<float> d;
+  const int64_t lanes = static_cast<int64_t>(hn::Lanes(d));
+
+  // Step 1: Find max using SIMD.
+  auto max_v = hn::Set(d, -INFINITY);
+  int64_t i = 0;
+  for (; i + lanes <= n; i += lanes) {
+    auto v = hn::Load(d, input + i);
+    max_v = hn::Max(max_v, v);
+  }
+  float max_val = hn::ReduceMax(d, max_v);
+  for (; i < n; ++i) {
+    if (input[i] > max_val)
+      max_val = input[i];
+  }
+
+  // Step 2: Exponentiate and sum (scalar — exp is transcendental).
+  float sum = 0.0f;
+  for (int64_t j = 0; j < n; ++j) {
+    output[j] = std::exp(input[j] - max_val);
+    sum += output[j];
+  }
+
+  // Step 3: Normalize with SIMD.
+  const auto inv_sum = hn::Set(d, 1.0f / sum);
+  i = 0;
+  for (; i + lanes <= n; i += lanes) {
+    auto v = hn::Load(d, output + i);
+    v = hn::Mul(v, inv_sum);
+    hn::Store(v, d, output + i);
+  }
+  float inv_sum_s = 1.0f / sum;
+  for (; i < n; ++i) {
+    output[i] *= inv_sum_s;
+  }
+}
+
+// --- RMS Norm (SIMD) ---
+void SimdRmsNormImpl(const float *input, const float *weight, float *output,
+                     int64_t n, float eps) {
+  const hn::ScalableTag<float> d;
+  const int64_t lanes = static_cast<int64_t>(hn::Lanes(d));
+
+  // Step 1: Compute sum of squares with SIMD.
+  auto ss_v = hn::Zero(d);
+  int64_t i = 0;
+  for (; i + lanes <= n; i += lanes) {
+    auto v = hn::Load(d, input + i);
+    ss_v = hn::MulAdd(v, v, ss_v);
+  }
+  float ss = hn::ReduceSum(d, ss_v);
+  for (; i < n; ++i) {
+    ss += input[i] * input[i];
+  }
+  ss /= static_cast<float>(n);
+
+  // Step 2: Compute scale factor.
+  float scale = 1.0f / std::sqrt(ss + eps);
+  const auto scale_v = hn::Set(d, scale);
+
+  // Step 3: Normalize and apply weight with SIMD.
+  i = 0;
+  for (; i + lanes <= n; i += lanes) {
+    auto iv = hn::Load(d, input + i);
+    auto wv = hn::Load(d, weight + i);
+    auto result = hn::Mul(hn::Mul(iv, scale_v), wv);
+    hn::Store(result, d, output + i);
+  }
+  for (; i < n; ++i) {
+    output[i] = input[i] * scale * weight[i];
+  }
+}
+
+// --- SiLU Activation (scalar — transcendental function) ---
+void SimdSiluImpl(const float *input, float *output, int64_t n) {
+  // SiLU = x / (1 + exp(-x)). The exp is transcendental so we stay scalar.
+  // Highway does have ApproximateExp, but std::exp is more accurate.
+  for (int64_t i = 0; i < n; ++i) {
+    output[i] = input[i] / (1.0f + std::exp(-input[i]));
+  }
+}
+
+// --- Element-wise Multiply (SIMD) ---
+void SimdMulImpl(const float *a, const float *b, float *c, int64_t n) {
+  const hn::ScalableTag<float> d;
+  const int64_t lanes = static_cast<int64_t>(hn::Lanes(d));
+
+  int64_t i = 0;
+  for (; i + lanes <= n; i += lanes) {
+    auto va = hn::Load(d, a + i);
+    auto vb = hn::Load(d, b + i);
+    hn::Store(hn::Mul(va, vb), d, c + i);
+  }
+  for (; i < n; ++i) {
+    c[i] = a[i] * b[i];
+  }
+}
+
+// --- Element-wise Add (SIMD) ---
+void SimdAddImpl(const float *a, const float *b, float *c, int64_t n) {
+  const hn::ScalableTag<float> d;
+  const int64_t lanes = static_cast<int64_t>(hn::Lanes(d));
+
+  int64_t i = 0;
+  for (; i + lanes <= n; i += lanes) {
+    auto va = hn::Load(d, a + i);
+    auto vb = hn::Load(d, b + i);
+    hn::Store(hn::Add(va, vb), d, c + i);
+  }
+  for (; i < n; ++i) {
+    c[i] = a[i] + b[i];
+  }
+}
+
+} // namespace HWY_NAMESPACE
+} // namespace compute
+} // namespace ie
+
+HWY_AFTER_NAMESPACE();
 
 // ============================================================================
-// Highway SIMD integration pattern:
-//
-// When you're ready to add SIMD, replace the scalar loops below with
-// Highway operations. The typical pattern is:
-//
-//   #include "hwy/highway.h"
-//   HWY_BEFORE_NAMESPACE();
-//   namespace ie {
-//   namespace compute {
-//   namespace HWY_NAMESPACE {
-//
-//     namespace hn = hwy::HWY_NAMESPACE;
-//
-//     void SimdDotProductImpl(const float* a, const float* b, float* out,
-//                             int64_t n) {
-//       const hn::ScalableTag<float> d;
-//       const int64_t lanes = hn::Lanes(d);
-//       auto sum = hn::Zero(d);
-//       int64_t i = 0;
-//       for (; i + lanes <= n; i += lanes) {
-//         auto va = hn::Load(d, a + i);
-//         auto vb = hn::Load(d, b + i);
-//         sum = hn::MulAdd(va, vb, sum);
-//       }
-//       *out = hn::ReduceSum(d, sum);
-//       // Handle remainder with scalar loop
-//       for (; i < n; ++i) *out += a[i] * b[i];
-//     }
-//
-//   }  // namespace HWY_NAMESPACE
-//   }  // namespace compute
-//   }  // namespace ie
-//   HWY_AFTER_NAMESPACE();
-//
-//   // Dispatch to the best available target at runtime:
-//   #if HWY_ONCE
-//   namespace ie { namespace compute {
-//   HWY_EXPORT(SimdDotProductImpl);
-//   float SimdDotProduct(const float* a, const float* b, int64_t n) {
-//     float result = 0;
-//     HWY_DYNAMIC_DISPATCH(SimdDotProductImpl)(a, b, &result, n);
-//     return result;
-//   }
-//   }}
-//   #endif
-//
+// Dynamic dispatch — Highway selects the best target at runtime.
+// This block runs only once (not per-target like the code above).
 // ============================================================================
+#if HWY_ONCE
 
 namespace ie {
 namespace compute {
 
-void SimdGemm(const float* a, const float* b, float* c,
-              int64_t M, int64_t N, int64_t K) {
-  // TODO: Implement GEMM
-  //
-  // Phase 1 — Naive (get correct output):
-  //   for (i = 0..M)
-  //     for (j = 0..N)
-  //       c[i*N + j] = 0
-  //       for (k = 0..K)
-  //         c[i*N + j] += a[i*K + k] * b[k*N + j]
-  //
-  // Phase 2 — Cache-friendly (reorder to i,k,j):
-  //   for (i = 0..M)
-  //     for (k = 0..K)
-  //       float a_ik = a[i*K + k]
-  //       for (j = 0..N)
-  //         c[i*N + j] += a_ik * b[k*N + j]    // b row accessed sequentially!
-  //
-  // Phase 3 — Tiled (L2-aware blocking):
-  //   Choose tile sizes TM, TN, TK such that:
-  //     TM * TK + TK * TN + TM * TN <= L2_CACHE_SIZE / sizeof(float)
-  //   For L2 = 256KB: TM=TN=TK=64 works well (48KB per tile set)
-  //
-  //   for (i0 = 0..M step TM)
-  //     for (j0 = 0..N step TN)
-  //       for (k0 = 0..K step TK)
-  //         // Micro-kernel: multiply TM x TK block of A by TK x TN block of B
-  //         // Prefetch next tile of B here: __builtin_prefetch(&b[(k0+TK)*N+j0])
-  //
-  // Phase 4 — SIMD: vectorize the inner j-loop with Highway
-  //
-  throw std::runtime_error(
-      "SimdGemm not implemented yet — start with the naive triple loop!");
+HWY_EXPORT(SimdDotProductImpl);
+float SimdDotProduct(const float *a, const float *b, int64_t n) {
+  return HWY_DYNAMIC_DISPATCH(SimdDotProductImpl)(a, b, n);
 }
 
-void SimdGemv(const float* a, const float* x, float* y,
-              int64_t M, int64_t K) {
-  // TODO: Implement GEMV
-  //   for (i = 0..M)
-  //     y[i] = dot_product(a + i*K, x, K)
-  //
-  throw std::runtime_error("SimdGemv not implemented yet");
+HWY_EXPORT(SimdGemmImpl);
+void SimdGemm(const float *a, const float *b, float *c, int64_t M, int64_t N,
+              int64_t K) {
+  HWY_DYNAMIC_DISPATCH(SimdGemmImpl)(a, b, c, M, N, K);
 }
 
-float SimdDotProduct(const float* a, const float* b, int64_t n) {
-  // TODO: Implement dot product
-  //   sum = 0
-  //   for (i = 0..n) sum += a[i] * b[i]
-  //   return sum
-  //
-  // Then: vectorize with Highway hn::MulAdd + hn::ReduceSum
-  //
-  throw std::runtime_error("SimdDotProduct not implemented yet");
+HWY_EXPORT(SimdGemvImpl);
+void SimdGemv(const float *a, const float *x, float *y, int64_t M, int64_t K) {
+  HWY_DYNAMIC_DISPATCH(SimdGemvImpl)(a, x, y, M, K);
 }
 
-void SimdSoftmax(const float* input, float* output, int64_t n) {
-  // TODO: Implement numerically stable softmax
-  //   1. max_val = max(input[0..n])
-  //   2. sum = 0; for each i: output[i] = exp(input[i] - max_val); sum += output[i]
-  //   3. for each i: output[i] /= sum
-  //
-  throw std::runtime_error("SimdSoftmax not implemented yet");
+HWY_EXPORT(SimdSoftmaxImpl);
+void SimdSoftmax(const float *input, float *output, int64_t n) {
+  HWY_DYNAMIC_DISPATCH(SimdSoftmaxImpl)(input, output, n);
 }
 
-void SimdRmsNorm(const float* input, const float* weight, float* output,
+HWY_EXPORT(SimdRmsNormImpl);
+void SimdRmsNorm(const float *input, const float *weight, float *output,
                  int64_t n, float eps) {
-  // TODO: Implement RMS normalization
-  //   1. ss = sum(input[i]^2) / n
-  //   2. scale = 1.0 / sqrt(ss + eps)
-  //   3. output[i] = input[i] * scale * weight[i]
-  //
-  throw std::runtime_error("SimdRmsNorm not implemented yet");
+  HWY_DYNAMIC_DISPATCH(SimdRmsNormImpl)(input, weight, output, n, eps);
 }
 
-void SimdSilu(const float* input, float* output, int64_t n) {
-  // TODO: Implement SiLU activation
-  //   output[i] = input[i] / (1.0 + exp(-input[i]))
-  //
-  throw std::runtime_error("SimdSilu not implemented yet");
+HWY_EXPORT(SimdSiluImpl);
+void SimdSilu(const float *input, float *output, int64_t n) {
+  HWY_DYNAMIC_DISPATCH(SimdSiluImpl)(input, output, n);
 }
 
-void SimdMul(const float* a, const float* b, float* c, int64_t n) {
-  // TODO: Element-wise multiply
-  throw std::runtime_error("SimdMul not implemented yet");
+HWY_EXPORT(SimdMulImpl);
+void SimdMul(const float *a, const float *b, float *c, int64_t n) {
+  HWY_DYNAMIC_DISPATCH(SimdMulImpl)(a, b, c, n);
 }
 
-void SimdAdd(const float* a, const float* b, float* c, int64_t n) {
-  // TODO: Element-wise add
-  throw std::runtime_error("SimdAdd not implemented yet");
+HWY_EXPORT(SimdAddImpl);
+void SimdAdd(const float *a, const float *b, float *c, int64_t n) {
+  HWY_DYNAMIC_DISPATCH(SimdAddImpl)(a, b, c, n);
 }
 
-}  // namespace compute
-}  // namespace ie
+} // namespace compute
+} // namespace ie
+
+#endif // HWY_ONCE
