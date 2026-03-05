@@ -47,14 +47,16 @@ std::string InferenceEngine::Generate(const std::string &prompt,
   // Step 1: Tokenize the prompt and prepend BOS.
   std::vector<int32_t> tokens = tokenizer_->Encode(prompt);
   tokens.insert(tokens.begin(), tokenizer_->BosId());
+  int32_t prompt_len = static_cast<int32_t>(tokens.size());
 
-  std::cout << "Prompt tokens: " << tokens.size() << std::endl;
+  std::cout << "Prompt tokens: " << prompt_len << std::endl;
 
   // Step 2: Prefill — run the full prompt through the model.
+  // This populates the KV cache for all prompt positions.
   Tensor input_tensor =
       Tensor::from_vector(std::vector<float>(tokens.begin(), tokens.end()));
 
-  Tensor logits = model_->forward(input_tensor, 0);
+  Tensor logits = model_->forward(input_tensor, /*start_pos=*/0);
 
   // Step 3: Sample the first generated token.
   int32_t next_token = SampleGreedy(logits);
@@ -62,18 +64,19 @@ std::string InferenceEngine::Generate(const std::string &prompt,
 
   std::cout << "Generating..." << std::flush;
 
-  // Step 4: Autoregressive decode loop (no KV cache — recomputes each step).
+  // Step 4: Autoregressive decode loop with KV cache.
+  // Each step only passes the single new token; the KV cache holds the history.
   for (int32_t i = 1; i < max_tokens; ++i) {
     if (next_token == tokenizer_->EosId()) {
       break;
     }
 
-    // Create input tensor with just the new token for the next position.
-    // Without KV cache, we need to re-run the full sequence each time.
-    Tensor full_input =
-        Tensor::from_vector(std::vector<float>(tokens.begin(), tokens.end()));
+    // Create input with just the new token.
+    Tensor single_token = Tensor::from_vector({static_cast<float>(next_token)});
 
-    logits = model_->forward(full_input, 0);
+    // start_pos = total tokens generated so far (prompt + generated).
+    int32_t start_pos = prompt_len + i - 1;
+    logits = model_->forward(single_token, start_pos);
 
     next_token = SampleGreedy(logits);
     tokens.push_back(next_token);
