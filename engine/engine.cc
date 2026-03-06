@@ -53,8 +53,11 @@ std::string InferenceEngine::Generate(const std::string &prompt,
 
   // Step 2: Prefill — run the full prompt through the model.
   // This populates the KV cache for all prompt positions.
-  Tensor input_tensor =
-      Tensor::from_vector(std::vector<float>(tokens.begin(), tokens.end()));
+  std::vector<float> token_floats(tokens.size());
+  for (size_t i = 0; i < tokens.size(); ++i) {
+    token_floats[i] = static_cast<float>(tokens[i]);
+  }
+  Tensor input_tensor = Tensor::from_vector(token_floats);
 
   Tensor logits = model_->forward(input_tensor, /*start_pos=*/0);
 

@@ -471,14 +471,26 @@ TEST(GGUFLoaderTest, MetadataAndTensorsTogether) {
 TEST(GGMLTypeTest, TypeToDType) {
   EXPECT_EQ(GGMLTypeToDType(GGMLType::kF32), DType::kFloat32);
   EXPECT_EQ(GGMLTypeToDType(GGMLType::kF16), DType::kFloat16);
-  EXPECT_THROW(GGMLTypeToDType(GGMLType::kQ4_0), std::runtime_error);
-  EXPECT_THROW(GGMLTypeToDType(GGMLType::kQ8_0), std::runtime_error);
+  // Q8_0 and Q4_0 are dequantized to FP32 on load.
+  EXPECT_EQ(GGMLTypeToDType(GGMLType::kQ8_0), DType::kFloat32);
+  EXPECT_EQ(GGMLTypeToDType(GGMLType::kQ4_0), DType::kFloat32);
+  // Unsupported types still throw.
+  EXPECT_THROW(GGMLTypeToDType(GGMLType::kQ4_1), std::runtime_error);
 }
 
 TEST(GGMLTypeTest, TypeSize) {
   EXPECT_EQ(GGMLTypeSize(GGMLType::kF32), 4u);
   EXPECT_EQ(GGMLTypeSize(GGMLType::kF16), 2u);
-  EXPECT_THROW(GGMLTypeSize(GGMLType::kQ4_0), std::runtime_error);
+  // For quantized types, returns the output element size (FP32 = 4).
+  EXPECT_EQ(GGMLTypeSize(GGMLType::kQ8_0), 4u);
+  EXPECT_EQ(GGMLTypeSize(GGMLType::kQ4_0), 4u);
+}
+
+TEST(GGMLTypeTest, BlockSizes) {
+  EXPECT_EQ(GGMLBlockElements(GGMLType::kQ8_0), 32);
+  EXPECT_EQ(GGMLBlockElements(GGMLType::kQ4_0), 32);
+  EXPECT_EQ(GGMLBlockBytes(GGMLType::kQ8_0), 34u); // 2 + 32
+  EXPECT_EQ(GGMLBlockBytes(GGMLType::kQ4_0), 18u); // 2 + 16
 }
 
 } // namespace

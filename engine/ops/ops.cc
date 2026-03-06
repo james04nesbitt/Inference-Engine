@@ -2,33 +2,43 @@
 
 #include <cmath>
 #include <cstring>
+#include <memory>
 #include <stdexcept>
 #include <vector>
+
+#include "engine/compute/simd_kernels.h"
+#include "engine/compute/thread_pool.h"
 
 namespace ie {
 namespace ops {
 
 // ============================================================================
-// Element-wise Operations
+// Global thread pool for parallel compute kernels.
+// Initialized lazily on first use, persists for process lifetime.
+// ============================================================================
+static compute::ThreadPool &GetThreadPool() {
+  static compute::ThreadPool pool(0); // 0 = hardware_concurrency
+  return pool;
+}
+
+// Minimum M dimension to parallelize matmul across threads.
+constexpr int64_t kParallelMatmulThreshold = 64;
+
+// ============================================================================
+// Element-wise Operations — SIMD accelerated
 // ============================================================================
 
 Tensor add(const Tensor &a, const Tensor &b) {
   if (!a.shape_equals(b)) {
     throw std::runtime_error("add: shapes are not equal");
   }
-  // Upcast to FP32 for computation, then convert back.
   DType out_dtype = a.dtype();
   Tensor a_f = a.to(DType::kFloat32).contiguous();
   Tensor b_f = b.to(DType::kFloat32).contiguous();
   Tensor c = Tensor::zeros(a_f.shape(), DType::kFloat32);
 
-  const float *a_data = a_f.data<float>();
-  const float *b_data = b_f.data<float>();
-  float *c_data = c.data<float>();
-
-  for (int64_t i = 0; i < a_f.numel(); ++i) {
-    c_data[i] = a_data[i] + b_data[i];
-  }
+  compute::SimdAdd(a_f.data<float>(), b_f.data<float>(), c.data<float>(),
+                   a_f.numel());
   return c.to(out_dtype);
 }
 
@@ -41,30 +51,21 @@ Tensor mul(const Tensor &a, const Tensor &b) {
   Tensor b_f = b.to(DType::kFloat32).contiguous();
   Tensor c = Tensor::zeros(a_f.shape(), DType::kFloat32);
 
-  const float *a_data = a_f.data<float>();
-  const float *b_data = b_f.data<float>();
-  float *c_data = c.data<float>();
-
-  for (int64_t i = 0; i < a_f.numel(); ++i) {
-    c_data[i] = a_data[i] * b_data[i];
-  }
+  compute::SimdMul(a_f.data<float>(), b_f.data<float>(), c.data<float>(),
+                   a_f.numel());
   return c.to(out_dtype);
 }
 
 // ============================================================================
-// Matrix Multiply — Cache-friendly i,k,j loop order
+// Matrix Multiply — SIMD + Multi-threaded
 // ============================================================================
 //
-// Standard matmul: C[M,N] = A[M,K] @ B[K,N]
+// For small M: call SimdGemm directly (single-threaded SIMD).
+// For large M: partition rows across thread pool, each thread runs SimdGemm
+//   on its slice of rows.
 //
-// The naive i,j,k order accesses B with stride N (column-wise), which is
-// cache-hostile. Reordering to i,k,j makes the inner loop stride-1 on both
-// B and C, giving ~3-5x speedup by maximizing L1/L2 cache line utilization.
-//
-// Next optimization steps (not yet implemented):
-//   - Tiling: break into L2-sized blocks (e.g. 64×64 for 256KB L2)
-//   - SIMD: vectorize inner loop with Highway (hn::MulAdd)
-//   - Threading: partition M dimension across thread pool
+// The inner loop uses Highway-vectorized dot products with cache-friendly
+// tiling and prefetching (as implemented in simd_kernels.cc).
 
 Tensor matmul(const Tensor &a, const Tensor &b) {
   if (a.ndim() != 2 || b.ndim() != 2) {
@@ -81,7 +82,6 @@ Tensor matmul(const Tensor &a, const Tensor &b) {
   const int64_t K = a.size(1);
   const int64_t N = b.size(1);
 
-  // Always compute in FP32 for numerical accuracy, convert output back.
   DType out_dtype = a.dtype();
   Tensor a_f = a.to(DType::kFloat32).contiguous();
   Tensor b_f = b.to(DType::kFloat32).contiguous();
@@ -91,32 +91,35 @@ Tensor matmul(const Tensor &a, const Tensor &b) {
   const float *B = b_f.data<float>();
   float *C = c.data<float>();
 
-  // Cache-friendly i,k,j loop order:
-  //   Inner loop touches C[i, 0..N-1] and B[k, 0..N-1] — both stride-1.
-  //   A[i,k] is invariant in the inner loop → hoisted into a register.
-  for (int64_t i = 0; i < M; ++i) {
-    for (int64_t k = 0; k < K; ++k) {
-      const float a_ik = A[i * K + k];
-      for (int64_t j = 0; j < N; ++j) {
-        C[i * N + j] += a_ik * B[k * N + j];
-      }
-    }
+  if (M >= kParallelMatmulThreshold) {
+    // Multi-threaded: partition M rows across thread pool.
+    auto &pool = GetThreadPool();
+    int64_t n_threads = static_cast<int64_t>(pool.NumThreads());
+    if (n_threads < 1)
+      n_threads = 1;
+
+    pool.ParallelFor(n_threads, [&](int64_t tid) {
+      int64_t rows_per_thread = (M + n_threads - 1) / n_threads;
+      int64_t start = tid * rows_per_thread;
+      int64_t end = std::min(start + rows_per_thread, M);
+      if (start >= M)
+        return;
+
+      int64_t chunk_m = end - start;
+      // Each thread runs SIMD GEMM on its row slice.
+      compute::SimdGemm(A + start * K, B, C + start * N, chunk_m, N, K);
+    });
+  } else {
+    // Single-threaded SIMD GEMM for small matrices.
+    compute::SimdGemm(A, B, C, M, N, K);
   }
+
   return c.to(out_dtype);
 }
 
 // ============================================================================
-// RMS Normalization
+// RMS Normalization — SIMD accelerated
 // ============================================================================
-//
-// Used by Gemma instead of LayerNorm. Simpler (no mean subtraction) and
-// empirically just as effective.
-//
-// For each "row" (all dims except the last):
-//   rms = sqrt(mean(x^2) + eps)
-//   output = (x / rms) * weight
-//
-// weight has shape [last_dim] — one scale per feature.
 
 Tensor rms_norm(const Tensor &x, const Tensor &weight, float eps) {
   if (x.ndim() < 1) {
@@ -136,59 +139,31 @@ Tensor rms_norm(const Tensor &x, const Tensor &weight, float eps) {
   const float *w_data = w_f.data<float>();
   float *o_data = out.data<float>();
 
-  // Number of "rows" = total elements / last_dim
   const int64_t n_rows = x_f.numel() / last_dim;
 
   for (int64_t row = 0; row < n_rows; ++row) {
-    const float *x_row = x_data + row * last_dim;
-    float *o_row = o_data + row * last_dim;
-
-    // 1. Compute mean of squares
-    float sum_sq = 0.0f;
-    for (int64_t j = 0; j < last_dim; ++j) {
-      sum_sq += x_row[j] * x_row[j];
-    }
-    float rms = std::sqrt(sum_sq / static_cast<float>(last_dim) + eps);
-
-    // 2. Normalize and scale by weight
-    float inv_rms = 1.0f / rms;
-    for (int64_t j = 0; j < last_dim; ++j) {
-      o_row[j] = x_row[j] * inv_rms * w_data[j];
-    }
+    compute::SimdRmsNorm(x_data + row * last_dim, w_data,
+                         o_data + row * last_dim, last_dim, eps);
   }
   return out.to(out_dtype);
 }
 
 // ============================================================================
-// SiLU Activation (Sigmoid Linear Unit)
+// SiLU Activation — SIMD accelerated
 // ============================================================================
-//
-// silu(x) = x * sigmoid(x) = x / (1 + exp(-x))
-//
-// Used in Gemma's SwiGLU FFN: FFN(x) = silu(W_gate @ x) * (W_up @ x)
 
 Tensor silu(const Tensor &x) {
   DType out_dtype = x.dtype();
   Tensor x_f = x.to(DType::kFloat32).contiguous();
   Tensor out = Tensor::zeros(x_f.shape(), DType::kFloat32);
 
-  const float *x_data = x_f.data<float>();
-  float *o_data = out.data<float>();
-
-  for (int64_t i = 0; i < x_f.numel(); ++i) {
-    float val = x_data[i];
-    float sigmoid = 1.0f / (1.0f + std::exp(-val));
-    o_data[i] = val * sigmoid;
-  }
+  compute::SimdSilu(x_f.data<float>(), out.data<float>(), x_f.numel());
   return out.to(out_dtype);
 }
 
 // ============================================================================
-// GeLU Activation (Gaussian Error Linear Unit)
+// GeLU Activation — scalar (no SIMD kernel for this)
 // ============================================================================
-//
-// Approximation (tanh form, same as PyTorch):
-//   gelu(x) = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
 
 Tensor gelu(const Tensor &x) {
   DType out_dtype = x.dtype();
@@ -198,7 +173,7 @@ Tensor gelu(const Tensor &x) {
   const float *x_data = x_f.data<float>();
   float *o_data = out.data<float>();
 
-  constexpr float kSqrt2OverPi = 0.7978845608028654f; // sqrt(2/pi)
+  constexpr float kSqrt2OverPi = 0.7978845608028654f;
   constexpr float kCoeff = 0.044715f;
 
   for (int64_t i = 0; i < x_f.numel(); ++i) {
@@ -210,24 +185,14 @@ Tensor gelu(const Tensor &x) {
 }
 
 // ============================================================================
-// Softmax — Numerically Stable
+// Softmax — SIMD accelerated for last-dim contiguous rows
 // ============================================================================
-//
-// softmax(x)_i = exp(x_i - max(x)) / sum(exp(x_j - max(x)))
-//
-// Subtracting max prevents overflow in exp(). This is standard practice
-// and mathematically equivalent to the naive formula.
-//
-// Operates along the specified dimension (default: last dim, i.e. -1).
-// For transformer inference, this is always the sequence dimension in
-// attention scores.
 
 Tensor softmax(const Tensor &x, int64_t dim) {
   if (x.ndim() < 1) {
     throw std::runtime_error("softmax: input must have at least 1 dimension");
   }
 
-  // Resolve negative dim
   if (dim < 0) {
     dim += x.ndim();
   }
@@ -242,9 +207,20 @@ Tensor softmax(const Tensor &x, int64_t dim) {
   const auto &shape = x_f.shape();
   const int64_t dim_size = shape[dim];
 
-  // Compute the number of independent softmax operations.
-  // For a tensor of shape [A, B, C] with dim=1, we do A*C softmax ops,
-  // each over B elements.
+  // Fast path: last-dim softmax on contiguous data → use SIMD kernel.
+  if (dim == x_f.ndim() - 1) {
+    const float *x_data = x_f.data<float>();
+    float *o_data = out.data<float>();
+    int64_t n_rows = x_f.numel() / dim_size;
+
+    for (int64_t row = 0; row < n_rows; ++row) {
+      compute::SimdSoftmax(x_data + row * dim_size, o_data + row * dim_size,
+                           dim_size);
+    }
+    return out.to(out_dtype);
+  }
+
+  // General path: arbitrary dim (rare in transformer inference).
   int64_t outer_size = 1;
   for (int64_t d = 0; d < dim; ++d) {
     outer_size *= shape[d];
@@ -259,11 +235,8 @@ Tensor softmax(const Tensor &x, int64_t dim) {
 
   for (int64_t outer = 0; outer < outer_size; ++outer) {
     for (int64_t inner = 0; inner < inner_size; ++inner) {
-      // Base offset into the contiguous buffer.
-      // Elements along `dim` are spaced `inner_size` apart.
       int64_t base = outer * dim_size * inner_size + inner;
 
-      // 1. Find max for numerical stability
       float max_val = x_data[base];
       for (int64_t d = 1; d < dim_size; ++d) {
         float v = x_data[base + d * inner_size];
@@ -271,7 +244,6 @@ Tensor softmax(const Tensor &x, int64_t dim) {
           max_val = v;
       }
 
-      // 2. Exponentiate and accumulate sum
       float sum = 0.0f;
       for (int64_t d = 0; d < dim_size; ++d) {
         float e = std::exp(x_data[base + d * inner_size] - max_val);
@@ -279,7 +251,6 @@ Tensor softmax(const Tensor &x, int64_t dim) {
         sum += e;
       }
 
-      // 3. Normalize
       float inv_sum = 1.0f / sum;
       for (int64_t d = 0; d < dim_size; ++d) {
         o_data[base + d * inner_size] *= inv_sum;
@@ -292,19 +263,6 @@ Tensor softmax(const Tensor &x, int64_t dim) {
 // ============================================================================
 // Rotary Positional Embedding (RoPE)
 // ============================================================================
-//
-// Encodes position information by rotating pairs of dimensions in Q/K vectors.
-//
-// Input x:         [batch, seq_len, n_heads, head_dim]
-// Input positions: [batch, seq_len]
-//
-// For dimension pair (2i, 2i+1) at position pos:
-//   theta = pos * freq_base^(-2i / head_dim)
-//   x'[..., 2i]   = x[..., 2i]   * cos(theta) - x[..., 2i+1] * sin(theta)
-//   x'[..., 2i+1] = x[..., 2i]   * sin(theta) + x[..., 2i+1] * cos(theta)
-//
-// This is a 2D rotation matrix applied to each pair. The frequencies decrease
-// geometrically, giving different dimensions sensitivity to different scales.
 
 Tensor rope(const Tensor &x, const Tensor &positions, float freq_base) {
   if (x.ndim() != 4) {
@@ -337,8 +295,6 @@ Tensor rope(const Tensor &x, const Tensor &positions, float freq_base) {
   const float *pos_data = pos_f.data<float>();
   float *o_data = out.data<float>();
 
-  // Precompute inverse frequencies: freq_base^(-2i/head_dim) for i in [0,
-  // half_dim)
   std::vector<float> inv_freq(half_dim);
   for (int64_t i = 0; i < half_dim; ++i) {
     inv_freq[i] = 1.0f / std::pow(freq_base, static_cast<float>(2 * i) /
@@ -372,13 +328,6 @@ Tensor rope(const Tensor &x, const Tensor &positions, float freq_base) {
 // ============================================================================
 // Embedding Table Lookup
 // ============================================================================
-//
-// table:   [vocab_size, embed_dim]
-// indices: 1D tensor of token IDs
-// output:  [num_tokens, embed_dim]
-//
-// Each output row is a copy of table[index]. This is the very first operation
-// in the transformer forward pass: token IDs → dense vectors.
 
 Tensor embedding(const Tensor &table, const Tensor &indices) {
   if (table.ndim() != 2) {
@@ -392,8 +341,6 @@ Tensor embedding(const Tensor &table, const Tensor &indices) {
   const int64_t embed_dim = table.size(1);
   const int64_t n_tokens = indices.size(0);
 
-  // Upcast table to FP32 for computation. Indices are read as float and
-  // cast to int64, so they work regardless of storage dtype.
   DType out_dtype = table.dtype();
   Tensor table_f = table.to(DType::kFloat32).contiguous();
   Tensor idx_f = indices.to(DType::kFloat32).contiguous();
@@ -411,7 +358,6 @@ Tensor embedding(const Tensor &table, const Tensor &indices) {
                                std::to_string(vocab_size) + ")");
     }
 
-    // Copy entire row: memcpy is faster than element-wise for contiguous data
     const float *src = t_data + idx * embed_dim;
     float *dst = o_data + t * embed_dim;
     std::memcpy(dst, src, static_cast<size_t>(embed_dim) * sizeof(float));

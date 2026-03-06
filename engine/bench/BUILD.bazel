@@ -1,13 +1,10 @@
 load("@rules_cc//cc:defs.bzl", "cc_binary")
 
-# NOTE: google_benchmark is commented out in MODULE.bazel due to
-# rules_foreign_cc incompatibility with Bazel 9. Uncomment when fixed.
-#
-# cc_binary(
-#     name = "matmul_bench",
-#     srcs = ["matmul_bench.cc"],
-#     deps = [
-#         "@google_benchmark//:benchmark_main",
-#         # "//engine/compute",
-#     ],
-# )
+cc_binary(
+    name = "matmul_bench",
+    srcs = ["matmul_bench.cc"],
+    defines = ["HWY_STATIC_DEFINE"],
+    deps = [
+        "//engine/compute",
+    ],
+)

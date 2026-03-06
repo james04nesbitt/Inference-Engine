@@ -1,5 +1,6 @@
 #include "engine/gguf/gguf_loader.h"
 
+#include <cmath>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -17,6 +18,10 @@ DType GGMLTypeToDType(GGMLType type) {
     return DType::kFloat32;
   case GGMLType::kF16:
     return DType::kFloat16;
+  case GGMLType::kQ8_0:
+  case GGMLType::kQ4_0:
+    // Quantized types are dequantized to FP32 during loading.
+    return DType::kFloat32;
   default:
     throw std::runtime_error("GGMLTypeToDType: unsupported/quantized type " +
                              std::to_string(static_cast<uint32_t>(type)));
@@ -29,9 +34,129 @@ size_t GGMLTypeSize(GGMLType type) {
     return 4;
   case GGMLType::kF16:
     return 2;
+  case GGMLType::kQ8_0:
+  case GGMLType::kQ4_0:
+    // Block-quantized: use GGMLBlockSize() for raw byte computation.
+    // Return the output element size (FP32) since we dequantize on load.
+    return 4;
   default:
     throw std::runtime_error("GGMLTypeSize: unsupported/quantized type " +
                              std::to_string(static_cast<uint32_t>(type)));
+  }
+}
+
+// Number of elements per quantization block.
+int64_t GGMLBlockElements(GGMLType type) {
+  switch (type) {
+  case GGMLType::kQ8_0:
+    return 32; // 32 INT8 values per block
+  case GGMLType::kQ4_0:
+    return 32; // 32 INT4 values per block (packed into 16 bytes)
+  default:
+    return 1; // Non-block types
+  }
+}
+
+// Raw byte size per quantization block.
+size_t GGMLBlockBytes(GGMLType type) {
+  switch (type) {
+  case GGMLType::kQ8_0:
+    return 2 + 32; // FP16 scale (2 bytes) + 32 INT8 values
+  case GGMLType::kQ4_0:
+    return 2 + 16; // FP16 scale (2 bytes) + 16 bytes (32 nibbles)
+  default:
+    return 0;
+  }
+}
+
+// ============================================================================
+// FP16 → FP32 conversion helper
+// ============================================================================
+static float Fp16ToFp32(uint16_t h) {
+  uint32_t sign = (h >> 15) & 0x1;
+  uint32_t exp = (h >> 10) & 0x1F;
+  uint32_t mant = h & 0x3FF;
+
+  if (exp == 0) {
+    if (mant == 0) {
+      // ±zero
+      uint32_t bits = sign << 31;
+      float f;
+      std::memcpy(&f, &bits, sizeof(f));
+      return f;
+    }
+    // Subnormal: convert to normalized FP32
+    float val = std::ldexp(static_cast<float>(mant), -24);
+    return sign ? -val : val;
+  }
+  if (exp == 31) {
+    // Inf/NaN
+    uint32_t bits = (sign << 31) | 0x7F800000 | (mant << 13);
+    float f;
+    std::memcpy(&f, &bits, sizeof(f));
+    return f;
+  }
+  // Normal number
+  uint32_t bits = (sign << 31) | ((exp - 15 + 127) << 23) | (mant << 13);
+  float f;
+  std::memcpy(&f, &bits, sizeof(f));
+  return f;
+}
+
+// ============================================================================
+// Q8_0 dequantization
+// ============================================================================
+// Block format: [FP16 scale (2 bytes)] [32 x INT8 values (32 bytes)] = 34 bytes
+// Dequantized: value[i] = scale * quant[i]
+static void DequantizeQ8_0(const uint8_t *src, float *dst, int64_t numel) {
+  constexpr int64_t BLOCK_SIZE = 32;
+  constexpr size_t BLOCK_BYTES = 2 + 32; // FP16 + 32 INT8s
+  int64_t n_blocks = numel / BLOCK_SIZE;
+
+  for (int64_t b = 0; b < n_blocks; ++b) {
+    const uint8_t *block = src + b * BLOCK_BYTES;
+
+    // Read FP16 scale
+    uint16_t scale_fp16;
+    std::memcpy(&scale_fp16, block, sizeof(scale_fp16));
+    float scale = Fp16ToFp32(scale_fp16);
+
+    // Read and dequantize 32 INT8 values
+    const int8_t *quants = reinterpret_cast<const int8_t *>(block + 2);
+    for (int64_t i = 0; i < BLOCK_SIZE; ++i) {
+      dst[b * BLOCK_SIZE + i] = scale * static_cast<float>(quants[i]);
+    }
+  }
+}
+
+// ============================================================================
+// Q4_0 dequantization
+// ============================================================================
+// Block format: [FP16 scale (2 bytes)] [16 bytes = 32 nibbles] = 18 bytes
+// Each byte holds two 4-bit values (low nibble first).
+// Values are unsigned [0, 15] with zero_point = 8: dequant = scale * (val - 8)
+static void DequantizeQ4_0(const uint8_t *src, float *dst, int64_t numel) {
+  constexpr int64_t BLOCK_SIZE = 32;
+  constexpr size_t BLOCK_BYTES = 2 + 16; // FP16 + 16 nibble bytes
+  int64_t n_blocks = numel / BLOCK_SIZE;
+
+  for (int64_t b = 0; b < n_blocks; ++b) {
+    const uint8_t *block = src + b * BLOCK_BYTES;
+
+    // Read FP16 scale
+    uint16_t scale_fp16;
+    std::memcpy(&scale_fp16, block, sizeof(scale_fp16));
+    float scale = Fp16ToFp32(scale_fp16);
+
+    // Read 16 bytes = 32 nibbles
+    const uint8_t *nibbles = block + 2;
+    for (int64_t i = 0; i < 16; ++i) {
+      uint8_t byte = nibbles[i];
+      int8_t lo = static_cast<int8_t>(byte & 0x0F) - 8;
+      int8_t hi = static_cast<int8_t>(byte >> 4) - 8;
+      dst[b * BLOCK_SIZE + i * 2] = scale * static_cast<float>(lo);
+      dst[b * BLOCK_SIZE + i * 2 + 1] = scale * static_cast<float>(hi);
+    }
   }
 }
 
@@ -350,17 +475,12 @@ const GGUFTensorInfo *GGUFFile::GetTensorInfo(const std::string &name) const {
 // ============================================================================
 
 Tensor GGUFFile::LoadTensor(const std::string &name) const {
-  // 1. Look up tensor info
   const GGUFTensorInfo *info = GetTensorInfo(name);
   if (!info) {
     throw std::runtime_error("LoadTensor: tensor not found: " + name);
   }
 
-  // 2. Convert GGMLType to our DType (throws for unsupported quantized types)
-  DType dtype = GGMLTypeToDType(info->type);
-  size_t elem_size = GGMLTypeSize(info->type);
-
-  // 3. Compute total number of elements and bytes
+  // Compute logical shape and element count.
   int64_t numel = 1;
   std::vector<int64_t> shape;
   shape.reserve(info->dimensions.size());
@@ -368,9 +488,8 @@ Tensor GGUFFile::LoadTensor(const std::string &name) const {
     shape.push_back(static_cast<int64_t>(d));
     numel *= static_cast<int64_t>(d);
   }
-  size_t nbytes = static_cast<size_t>(numel) * elem_size;
 
-  // 4. Open the file and seek to the tensor's data
+  // Open the file and seek to the tensor's data.
   std::ifstream file(file_path_, std::ios::binary);
   if (!file.is_open()) {
     throw std::runtime_error("LoadTensor: cannot open file: " + file_path_);
@@ -381,7 +500,41 @@ Tensor GGUFFile::LoadTensor(const std::string &name) const {
     throw std::runtime_error("LoadTensor: seek failed for tensor: " + name);
   }
 
-  // 5. Allocate buffer and read raw bytes
+  // --- Branch: block-quantized types require dequantization on load ---
+  if (info->type == GGMLType::kQ8_0 || info->type == GGMLType::kQ4_0) {
+    int64_t block_elems = GGMLBlockElements(info->type);
+    size_t block_bytes = GGMLBlockBytes(info->type);
+    int64_t n_blocks = numel / block_elems;
+    size_t raw_bytes = static_cast<size_t>(n_blocks) * block_bytes;
+
+    // Read raw quantized data.
+    std::vector<uint8_t> raw(raw_bytes);
+    file.read(reinterpret_cast<char *>(raw.data()),
+              static_cast<std::streamsize>(raw_bytes));
+    if (file.fail()) {
+      throw std::runtime_error("LoadTensor: read failed for tensor: " + name);
+    }
+
+    // Allocate FP32 output and dequantize.
+    size_t out_bytes = static_cast<size_t>(numel) * sizeof(float);
+    auto buf = std::shared_ptr<uint8_t[]>(new uint8_t[out_bytes]);
+    float *out = reinterpret_cast<float *>(buf.get());
+
+    if (info->type == GGMLType::kQ8_0) {
+      DequantizeQ8_0(raw.data(), out, numel);
+    } else {
+      DequantizeQ4_0(raw.data(), out, numel);
+    }
+
+    return Tensor::from_buffer(std::move(buf), std::move(shape),
+                               DType::kFloat32);
+  }
+
+  // --- Non-quantized types: direct load ---
+  DType dtype = GGMLTypeToDType(info->type);
+  size_t elem_size = GGMLTypeSize(info->type);
+  size_t nbytes = static_cast<size_t>(numel) * elem_size;
+
   auto buf = std::shared_ptr<uint8_t[]>(new uint8_t[nbytes]);
   file.read(reinterpret_cast<char *>(buf.get()),
             static_cast<std::streamsize>(nbytes));
@@ -389,7 +542,6 @@ Tensor GGUFFile::LoadTensor(const std::string &name) const {
     throw std::runtime_error("LoadTensor: read failed for tensor: " + name);
   }
 
-  // 6. Wrap in a Tensor — zero-copy, from_buffer shares the buffer
   return Tensor::from_buffer(std::move(buf), std::move(shape), dtype);
 }
 

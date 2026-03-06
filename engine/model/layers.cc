@@ -2,6 +2,7 @@
 
 #include <cmath>
 
+#include "engine/attention/flash_attention.h"
 #include "engine/ops/ops.h"
 
 namespace ie {
@@ -107,47 +108,18 @@ Tensor Attention::forward(const Tensor &x, int32_t start_pos) const {
     V = V.repeat(1, num_groups);
   }
 
-  // --- Step 6-8: Per-head scaled dot-product attention ---
+  // --- Step 6: FlashAttention ---
+  // flash_attention expects [seq_q, num_heads, head_dim] for Q
+  // and [seq_kv, num_heads, head_dim] for K,V (already GQA-expanded).
   float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
 
-  Tensor output({seq_len, static_cast<int64_t>(num_heads),
-                 static_cast<int64_t>(head_dim)});
+  // Causal masking: during prefill (start_pos==0), we need causal mask.
+  // During decode (seq_len_q==1), causal has no effect since there's only
+  // one query position.
+  Tensor output = flash_attention(Q, K, V, scale, /*causal=*/true);
 
-  for (int32_t h = 0; h < num_heads; ++h) {
-    Tensor Q_h = Q.select(1, h).contiguous(); // [seq_len, hd]
-    Tensor K_h = K.select(1, h).contiguous(); // [kv_len, hd]
-    Tensor V_h = V.select(1, h).contiguous(); // [kv_len, hd]
-
-    // scores = Q_h @ K_h^T * scale  ->  [seq_len, kv_len]
-    Tensor K_h_t = K_h.transpose(0, 1).contiguous();
-    Tensor scores = ops::matmul(Q_h, K_h_t);
-
-    float *scores_ptr = scores.data<float>();
-    for (int64_t i = 0; i < scores.numel(); ++i) {
-      scores_ptr[i] *= scale;
-    }
-
-    // Causal mask: position qi (at absolute position start_pos + qi)
-    // can only attend to positions <= start_pos + qi.
-    for (int64_t qi = 0; qi < seq_len; ++qi) {
-      int64_t abs_q_pos = start_pos + qi;
-      for (int64_t ki = abs_q_pos + 1; ki < kv_len; ++ki) {
-        scores.set({qi, ki}, -INFINITY);
-      }
-    }
-
-    Tensor attn_weights = ops::softmax(scores);
-    Tensor attn_out = ops::matmul(attn_weights, V_h);
-
-    const float *src = attn_out.data<float>();
-    for (int64_t s = 0; s < seq_len; ++s) {
-      for (int64_t d = 0; d < head_dim; ++d) {
-        output.set({s, static_cast<int64_t>(h), d}, src[s * head_dim + d]);
-      }
-    }
-  }
-
-  // --- Step 9: Concatenate heads and project ---
+  // --- Step 7: Concatenate heads and project ---
+  // output: [seq_len, num_heads, head_dim] -> [seq_len, embed_dim]
   Tensor concat =
       output.reshape({seq_len, static_cast<int64_t>(num_heads * head_dim)});
   return ops::matmul(concat, wo_t);

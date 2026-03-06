@@ -62,8 +62,14 @@ enum class GGMLType : uint32_t {
 DType GGMLTypeToDType(GGMLType type);
 
 // Returns the number of bytes per element for a given GGMLType.
-// Only valid for non-block-quantized types (F32, F16).
+// For block-quantized types, returns the output element size (FP32 = 4).
 size_t GGMLTypeSize(GGMLType type);
+
+// Returns the number of elements per quantization block (32 for Q8_0/Q4_0).
+int64_t GGMLBlockElements(GGMLType type);
+
+// Returns the raw byte size per quantization block.
+size_t GGMLBlockBytes(GGMLType type);
 
 // ============================================================================
 // Parsed structures from a GGUF file

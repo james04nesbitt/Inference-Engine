@@ -6,6 +6,7 @@ cc_library(
     hdrs = ["ops.h"],
     visibility = ["//visibility:public"],
     deps = [
+        "//engine/compute",
         "//engine/tensor",
     ],
 )
