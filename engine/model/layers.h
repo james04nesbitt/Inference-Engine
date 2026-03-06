@@ -3,23 +3,14 @@
 #include <memory>
 #include <vector>
 
+#include "engine/attention/kv_cache.h"
 #include "engine/model/config.h"
 #include "engine/tensor/tensor.h"
 
 namespace ie {
 
 // ============================================================================
-// Transformer Layers — YOUR CORE ML LEARNING OBJECTIVE
-//
-// Each layer class stores references to its weight tensors (loaded from GGUF)
-// and implements a forward() method that performs the computation.
-//
-// Implementation order suggestion:
-//   1. RMSNorm (simplest, good warmup)
-//   2. FeedForward (matmul + activation)
-//   3. Attention (the main event — Q/K/V projections, scaled dot-product)
-//   4. TransformerBlock (combines the above)
-//   5. GemmaModel (embeddings + blocks + final norm)
+// Transformer Layers
 // ============================================================================
 
 // --- RMS Layer Normalization ---
@@ -27,8 +18,6 @@ class RMSNorm {
 public:
   RMSNorm(Tensor weight, float eps) : weight_(std::move(weight)), eps_(eps) {}
 
-  // TODO: Implement
-  //   output = (x / sqrt(mean(x^2) + eps)) * weight
   Tensor forward(const Tensor &x) const;
 
 private:
@@ -39,42 +28,27 @@ private:
 // --- Multi-Head Attention with Grouped Query Attention (GQA) ---
 class Attention {
 public:
-  Attention(const GemmaConfig &config, Tensor wq, Tensor wk, Tensor wv,
-            Tensor wo)
-      : config_(config), wq_(std::move(wq)), wk_(std::move(wk)),
-        wv_(std::move(wv)), wo_(std::move(wo)) {}
+  Attention(const GemmaConfig &config, int32_t layer_idx, Tensor wq, Tensor wk,
+            Tensor wv, Tensor wo)
+      : config_(config), layer_idx_(layer_idx), wq_(std::move(wq)),
+        wk_(std::move(wk)), wv_(std::move(wv)), wo_(std::move(wo)) {}
 
-  // Forward pass with integrated KV cache.
-  // During prefill (start_pos == 0), caches all K/V states.
-  // During decode (start_pos > 0), appends new K/V to cache and
-  // attends over the full cached history.
-  Tensor forward(const Tensor &x, int32_t start_pos) const;
-
-  // Clear the KV cache (call between sequences).
-  void ClearCache() const;
+  Tensor forward(const Tensor &x, int32_t start_pos, KVCacheManager &kv_cache,
+                 int64_t seq_id) const;
 
 private:
   GemmaConfig config_;
+  int32_t layer_idx_;
   Tensor wq_, wk_, wv_, wo_;
-
-  // Mutable KV cache for autoregressive generation.
-  // k_cache_/v_cache_: [cached_seq_len, num_kv_heads, head_dim]
-  // Grows as tokens are generated.
-  mutable Tensor k_cache_;
-  mutable Tensor v_cache_;
 };
 
-// --- Feed-Forward Network (SwiGLU variant used by Gemma) ---
+// --- Feed-Forward Network (SwiGLU variant) ---
 class FeedForward {
 public:
   FeedForward(Tensor w_gate, Tensor w_up, Tensor w_down)
       : w_gate_(std::move(w_gate)), w_up_(std::move(w_up)),
         w_down_(std::move(w_down)) {}
 
-  // TODO: Implement SwiGLU feed-forward
-  //   gate = silu(x @ w_gate)
-  //   up   = x @ w_up
-  //   output = (gate * up) @ w_down
   Tensor forward(const Tensor &x) const;
 
 private:
@@ -84,19 +58,19 @@ private:
 // --- Single Transformer Block ---
 class TransformerBlock {
 public:
-  TransformerBlock(const GemmaConfig &config, RMSNorm attn_norm, Attention attn,
-                   RMSNorm ffn_norm, FeedForward ffn)
-      : config_(config), attn_norm_(std::move(attn_norm)),
-        attn_(std::move(attn)), ffn_norm_(std::move(ffn_norm)),
-        ffn_(std::move(ffn)) {}
+  TransformerBlock(const GemmaConfig &config, int32_t layer_idx,
+                   RMSNorm attn_norm, Attention attn, RMSNorm ffn_norm,
+                   FeedForward ffn)
+      : config_(config), layer_idx_(layer_idx),
+        attn_norm_(std::move(attn_norm)), attn_(std::move(attn)),
+        ffn_norm_(std::move(ffn_norm)), ffn_(std::move(ffn)) {}
 
-  // TODO: Implement
-  //   x = x + attn(attn_norm(x))     // Attention with residual
-  //   x = x + ffn(ffn_norm(x))       // FFN with residual
-  Tensor forward(const Tensor &x, int32_t start_pos) const;
+  Tensor forward(const Tensor &x, int32_t start_pos, KVCacheManager &kv_cache,
+                 int64_t seq_id) const;
 
 private:
   GemmaConfig config_;
+  int32_t layer_idx_;
   RMSNorm attn_norm_;
   Attention attn_;
   RMSNorm ffn_norm_;
@@ -104,6 +78,7 @@ private:
 };
 
 // --- Full Gemma Model ---
+// KV cache is externally owned — the caller (engine/scheduler) manages it.
 class GemmaModel {
 public:
   GemmaModel(GemmaConfig config, Tensor token_embedding,
@@ -112,14 +87,9 @@ public:
         token_embedding_(std::move(token_embedding)),
         layers_(std::move(layers)), final_norm_(std::move(final_norm)) {}
 
-  // TODO: Implement the full forward pass
-  //   1. Embed tokens: x = embedding_table[token_ids]
-  //   2. Scale embeddings: x = x * sqrt(embed_dim)  (Gemma-specific)
-  //   3. For each transformer block: x = block.forward(x, start_pos)
-  //   4. Final norm: x = final_norm(x)
-  //   5. Compute logits: logits = x @ embedding_table^T  (weight tying)
-  //   6. Return logits for the last token position
-  Tensor forward(const Tensor &tokens, int32_t start_pos) const;
+  // Forward pass with externally-provided KV cache.
+  Tensor forward(const Tensor &tokens, int32_t start_pos,
+                 KVCacheManager &kv_cache, int64_t seq_id) const;
 
   const GemmaConfig &config() const { return config_; }
 

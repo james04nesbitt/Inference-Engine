@@ -1,7 +1,9 @@
 #include "engine/engine.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <iomanip>
 #include <iostream>
 #include <numeric>
 #include <random>
@@ -15,7 +17,6 @@ namespace ie {
 bool InferenceEngine::LoadModel(const std::string &model_path) {
   std::cout << "Loading model from: " << model_path << std::endl;
 
-  // Step 1: Parse the GGUF file.
   if (!gguf_.Open(model_path)) {
     std::cerr << "Failed to open GGUF file" << std::endl;
     return false;
@@ -23,12 +24,10 @@ bool InferenceEngine::LoadModel(const std::string &model_path) {
 
   gguf_.PrintSummary();
 
-  // Step 2: Build tokenizer from GGUF metadata.
   if (!BuildTokenizer()) {
     std::cerr << "Warning: Failed to build tokenizer" << std::endl;
   }
 
-  // Step 3: Build the model from weights.
   if (!BuildModel()) {
     std::cerr << "Warning: Failed to build model" << std::endl;
   }
@@ -37,8 +36,23 @@ bool InferenceEngine::LoadModel(const std::string &model_path) {
   return true;
 }
 
+// ============================================================================
+// Generate — One-shot generation (convenience wrapper)
+// ============================================================================
 std::string InferenceEngine::Generate(const std::string &prompt,
                                       int32_t max_tokens) {
+  SamplingConfig config;
+  config.strategy = SamplingStrategy::kGreedy;
+  return GenerateStreaming(prompt, max_tokens, config, nullptr);
+}
+
+// ============================================================================
+// GenerateStreaming — Token-by-token generation with callback
+// ============================================================================
+std::string InferenceEngine::GenerateStreaming(
+    const std::string &prompt, int32_t max_tokens,
+    const SamplingConfig &sampling_config,
+    std::function<void(const std::string &)> on_token) {
   if (!model_ || !tokenizer_) {
     throw std::runtime_error(
         "Model or tokenizer not loaded. Call LoadModel() first.");
@@ -49,53 +63,100 @@ std::string InferenceEngine::Generate(const std::string &prompt,
   tokens.insert(tokens.begin(), tokenizer_->BosId());
   int32_t prompt_len = static_cast<int32_t>(tokens.size());
 
-  std::cout << "Prompt tokens: " << prompt_len << std::endl;
-
   // Step 2: Prefill — run the full prompt through the model.
-  // This populates the KV cache for all prompt positions.
   std::vector<float> token_floats(tokens.size());
   for (size_t i = 0; i < tokens.size(); ++i) {
     token_floats[i] = static_cast<float>(tokens[i]);
   }
   Tensor input_tensor = Tensor::from_vector(token_floats);
 
+  auto t_start = std::chrono::high_resolution_clock::now();
+
   Tensor logits = model_->forward(input_tensor, /*start_pos=*/0);
 
+  auto t_prefill = std::chrono::high_resolution_clock::now();
+  double prefill_ms =
+      std::chrono::duration<double, std::milli>(t_prefill - t_start).count();
+
   // Step 3: Sample the first generated token.
-  int32_t next_token = SampleGreedy(logits);
+  int32_t next_token = Sample(logits, sampling_config);
   tokens.push_back(next_token);
 
-  std::cout << "Generating..." << std::flush;
+  // Decode and stream the first token.
+  if (on_token) {
+    std::string decoded = tokenizer_->Decode({next_token});
+    on_token(decoded);
+  }
 
   // Step 4: Autoregressive decode loop with KV cache.
-  // Each step only passes the single new token; the KV cache holds the history.
+  int32_t generated_count = 1;
   for (int32_t i = 1; i < max_tokens; ++i) {
     if (next_token == tokenizer_->EosId()) {
       break;
     }
 
-    // Create input with just the new token.
     Tensor single_token = Tensor::from_vector({static_cast<float>(next_token)});
-
-    // start_pos = total tokens generated so far (prompt + generated).
     int32_t start_pos = prompt_len + i - 1;
     logits = model_->forward(single_token, start_pos);
 
-    next_token = SampleGreedy(logits);
+    next_token = Sample(logits, sampling_config);
     tokens.push_back(next_token);
+    generated_count++;
 
-    std::cout << "." << std::flush;
+    // Stream decoded token.
+    if (on_token) {
+      std::string decoded = tokenizer_->Decode({next_token});
+      on_token(decoded);
+    }
   }
 
-  std::cout << " done! (" << tokens.size() << " tokens)" << std::endl;
+  auto t_end = std::chrono::high_resolution_clock::now();
+  double total_ms =
+      std::chrono::duration<double, std::milli>(t_end - t_start).count();
+  double decode_ms =
+      std::chrono::duration<double, std::milli>(t_end - t_prefill).count();
 
-  // Step 5: Decode tokens back to text (skip BOS).
+  // Print timing stats.
+  double tokens_per_sec =
+      (decode_ms > 0) ? (generated_count * 1000.0 / decode_ms) : 0;
+  std::cerr << "\n\n--- Stats ---"
+            << "\n  Prompt tokens:  " << prompt_len
+            << "\n  Generated:      " << generated_count
+            << "\n  Prefill:        " << static_cast<int>(prefill_ms) << " ms"
+            << "\n  Decode:         " << static_cast<int>(decode_ms) << " ms"
+            << "\n  Total:          " << static_cast<int>(total_ms) << " ms"
+            << "\n  Tokens/sec:     " << std::fixed << std::setprecision(2)
+            << tokens_per_sec << std::endl;
+
+  // Step 5: Decode all tokens (skip BOS).
   std::vector<int32_t> output_tokens(tokens.begin() + 1, tokens.end());
   return tokenizer_->Decode(output_tokens);
 }
 
+void InferenceEngine::ClearCache() {
+  if (model_) {
+    model_->ClearCache();
+  }
+}
+
+// ============================================================================
+// Sample — Dispatch to selected sampling strategy
+// ============================================================================
+int32_t InferenceEngine::Sample(const Tensor &logits,
+                                const SamplingConfig &config) const {
+  switch (config.strategy) {
+  case SamplingStrategy::kGreedy:
+    return SampleGreedy(logits);
+  case SamplingStrategy::kTopK:
+    return SampleTopK(logits, config.top_k, config.temperature);
+  case SamplingStrategy::kTopP:
+    return SampleTopP(logits, config.top_p, config.temperature);
+  default:
+    return SampleGreedy(logits);
+  }
+}
+
 bool InferenceEngine::BuildModel() {
-  // Read model config from GGUF metadata.
   config_.num_layers =
       static_cast<int32_t>(gguf_.GetInt("gemma.block_count", 26));
   config_.embed_dim =
@@ -122,49 +183,41 @@ bool InferenceEngine::BuildModel() {
             << "\n  hidden_dim:   " << config_.hidden_dim
             << "\n  vocab_size:   " << config_.vocab_size << std::endl;
 
-  // Load the token embedding table.
   Tensor token_embedding = gguf_.LoadTensor("token_embd.weight");
 
-  // Build each transformer block.
   std::vector<TransformerBlock> layers;
   layers.reserve(config_.num_layers);
 
   for (int32_t i = 0; i < config_.num_layers; ++i) {
     std::string prefix = "blk." + std::to_string(i) + ".";
 
-    // Attention weights.
     Tensor wq = gguf_.LoadTensor(prefix + "attn_q.weight");
     Tensor wk = gguf_.LoadTensor(prefix + "attn_k.weight");
     Tensor wv = gguf_.LoadTensor(prefix + "attn_v.weight");
     Tensor wo = gguf_.LoadTensor(prefix + "attn_output.weight");
 
-    // FFN weights.
     Tensor w_gate = gguf_.LoadTensor(prefix + "ffn_gate.weight");
     Tensor w_up = gguf_.LoadTensor(prefix + "ffn_up.weight");
     Tensor w_down = gguf_.LoadTensor(prefix + "ffn_down.weight");
 
-    // Normalization weights.
     Tensor attn_norm_w = gguf_.LoadTensor(prefix + "attn_norm.weight");
     Tensor ffn_norm_w = gguf_.LoadTensor(prefix + "ffn_norm.weight");
 
-    // Construct the block.
     RMSNorm attn_norm(std::move(attn_norm_w), config_.rms_norm_eps);
-    Attention attn(config_, std::move(wq), std::move(wk), std::move(wv),
+    Attention attn(config_, i, std::move(wq), std::move(wk), std::move(wv),
                    std::move(wo));
     RMSNorm ffn_norm(std::move(ffn_norm_w), config_.rms_norm_eps);
     FeedForward ffn(std::move(w_gate), std::move(w_up), std::move(w_down));
 
-    layers.emplace_back(config_, std::move(attn_norm), std::move(attn),
+    layers.emplace_back(config_, i, std::move(attn_norm), std::move(attn),
                         std::move(ffn_norm), std::move(ffn));
 
     std::cout << "  Loaded block " << i << std::endl;
   }
 
-  // Load final norm weight.
   Tensor final_norm_w = gguf_.LoadTensor("output_norm.weight");
   RMSNorm final_norm(std::move(final_norm_w), config_.rms_norm_eps);
 
-  // Assemble the model.
   model_ =
       std::make_unique<GemmaModel>(config_, std::move(token_embedding),
                                    std::move(layers), std::move(final_norm));
@@ -175,7 +228,6 @@ bool InferenceEngine::BuildModel() {
 }
 
 bool InferenceEngine::BuildTokenizer() {
-  // Extract vocabulary tokens from GGUF metadata.
   auto *tokens_val = gguf_.GetMetadata("tokenizer.ggml.tokens");
   if (!tokens_val) {
     std::cerr << "BuildTokenizer: missing tokenizer.ggml.tokens" << std::endl;
@@ -188,7 +240,6 @@ bool InferenceEngine::BuildTokenizer() {
     return false;
   }
 
-  // Extract scores.
   auto *scores_val = gguf_.GetMetadata("tokenizer.ggml.scores");
   if (!scores_val) {
     std::cerr << "BuildTokenizer: missing tokenizer.ggml.scores" << std::endl;
@@ -201,7 +252,6 @@ bool InferenceEngine::BuildTokenizer() {
     return false;
   }
 
-  // Extract special token IDs (with reasonable defaults).
   int32_t bos_id =
       static_cast<int32_t>(gguf_.GetInt("tokenizer.ggml.bos_token_id", 2));
   int32_t eos_id =
@@ -223,7 +273,6 @@ bool InferenceEngine::BuildTokenizer() {
 // ============================================================================
 
 int32_t InferenceEngine::SampleGreedy(const Tensor &logits) const {
-  // Argmax: find the token with the highest logit value.
   const float *data = logits.data<float>();
   int64_t n = logits.numel();
   int32_t best_idx = 0;
@@ -242,7 +291,6 @@ int32_t InferenceEngine::SampleTopK(const Tensor &logits, int32_t k,
   const float *data = logits.data<float>();
   int64_t n = logits.numel();
 
-  // Create index-value pairs and partial sort to get top-k.
   std::vector<std::pair<float, int32_t>> indexed(n);
   for (int64_t i = 0; i < n; ++i) {
     indexed[i] = {data[i] / temperature, static_cast<int32_t>(i)};
@@ -253,7 +301,6 @@ int32_t InferenceEngine::SampleTopK(const Tensor &logits, int32_t k,
       indexed.begin(), indexed.begin() + k, indexed.end(),
       [](const auto &a, const auto &b) { return a.first > b.first; });
 
-  // Softmax over top-k logits.
   float max_val = indexed[0].first;
   std::vector<float> probs(k);
   float sum = 0.0f;
@@ -265,7 +312,6 @@ int32_t InferenceEngine::SampleTopK(const Tensor &logits, int32_t k,
     probs[i] /= sum;
   }
 
-  // Sample from the distribution.
   static std::mt19937 rng(42);
   std::discrete_distribution<int32_t> dist(probs.begin(), probs.end());
   return indexed[dist(rng)].second;
@@ -276,17 +322,14 @@ int32_t InferenceEngine::SampleTopP(const Tensor &logits, float p,
   const float *data = logits.data<float>();
   int64_t n = logits.numel();
 
-  // Temperature-scale and create index-value pairs.
   std::vector<std::pair<float, int32_t>> indexed(n);
   for (int64_t i = 0; i < n; ++i) {
     indexed[i] = {data[i] / temperature, static_cast<int32_t>(i)};
   }
 
-  // Sort by logit descending.
   std::sort(indexed.begin(), indexed.end(),
             [](const auto &a, const auto &b) { return a.first > b.first; });
 
-  // Softmax over all logits.
   float max_val = indexed[0].first;
   std::vector<float> probs(n);
   float sum = 0.0f;
@@ -298,7 +341,6 @@ int32_t InferenceEngine::SampleTopP(const Tensor &logits, float p,
     probs[i] /= sum;
   }
 
-  // Nucleus: keep tokens until cumulative probability >= p.
   float cumsum = 0.0f;
   int32_t cutoff = static_cast<int32_t>(n);
   for (int64_t i = 0; i < n; ++i) {
@@ -309,7 +351,6 @@ int32_t InferenceEngine::SampleTopP(const Tensor &logits, float p,
     }
   }
 
-  // Renormalize the kept probabilities.
   std::vector<float> kept_probs(probs.begin(), probs.begin() + cutoff);
   float kept_sum = 0.0f;
   for (float prob : kept_probs)
@@ -317,7 +358,6 @@ int32_t InferenceEngine::SampleTopP(const Tensor &logits, float p,
   for (float &prob : kept_probs)
     prob /= kept_sum;
 
-  // Sample from the distribution.
   static std::mt19937 rng(42);
   std::discrete_distribution<int32_t> dist(kept_probs.begin(),
                                            kept_probs.end());

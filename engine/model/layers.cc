@@ -10,50 +10,41 @@ namespace ie {
 // ============================================================================
 // RMSNorm::forward
 // ============================================================================
-// Delegates to the already-implemented ops::rms_norm kernel.
-// output = (x / sqrt(mean(x^2) + eps)) * weight
+//   output = (x / sqrt(mean(x^2) + eps)) * weight
 Tensor RMSNorm::forward(const Tensor &x) const {
+  // x: [seq_len, dim]
+  // Use the vectorized rms_norm op.
   return ops::rms_norm(x, weight_, eps_);
 }
 
 // ============================================================================
-// FeedForward::forward — SwiGLU variant
+// FeedForward::forward — SwiGLU
 // ============================================================================
 //   gate = silu(x @ w_gate^T)
 //   up   = x @ w_up^T
 //   output = (gate * up) @ w_down^T
-//
-// Weight matrices have shape [hidden_dim, embed_dim] (GGUF stores them
-// transposed), so we need x @ W^T = matmul(x, transpose(W)).
-// The ops::matmul handles [seq, embed] @ [embed, hidden] = [seq, hidden],
-// so we transpose the weight matrices before multiplication.
 Tensor FeedForward::forward(const Tensor &x) const {
-  // x: [seq_len, embed_dim]
-  // w_gate_: [hidden_dim, embed_dim] -> transpose -> [embed_dim, hidden_dim]
-  Tensor w_gate_t = w_gate_.transpose(0, 1).contiguous();
-  Tensor w_up_t = w_up_.transpose(0, 1).contiguous();
-  Tensor w_down_t = w_down_.transpose(0, 1).contiguous();
+  // Transpose weights for matmul: [out, in] -> [in, out]
+  Tensor gate_t = w_gate_.transpose(0, 1).contiguous();
+  Tensor up_t = w_up_.transpose(0, 1).contiguous();
+  Tensor down_t = w_down_.transpose(0, 1).contiguous();
 
-  // gate = silu(x @ w_gate^T)  ->  [seq_len, hidden_dim]
-  Tensor gate = ops::silu(ops::matmul(x, w_gate_t));
+  // gate = silu(x @ w_gate^T)
+  Tensor gate = ops::silu(ops::matmul(x, gate_t));
 
-  // up = x @ w_up^T  ->  [seq_len, hidden_dim]
-  Tensor up = ops::matmul(x, w_up_t);
+  // up = x @ w_up^T
+  Tensor up = ops::matmul(x, up_t);
 
-  // output = (gate * up) @ w_down^T  ->  [seq_len, embed_dim]
-  // Note: w_down is [embed_dim, hidden_dim] so w_down^T is [hidden_dim,
-  // embed_dim]
-  return ops::matmul(ops::mul(gate, up), w_down_t);
+  // output = (gate * up) @ w_down^T
+  return ops::matmul(ops::mul(gate, up), down_t);
 }
 
 // ============================================================================
-// Attention::forward — Multi-Head Attention with GQA
+// Attention::forward — with Paged KV Cache
 // ============================================================================
-// This implements the full attention forward pass without KV caching (prefill).
-// start_pos is accepted for future KV cache support.
-Tensor Attention::forward(const Tensor &x, int32_t start_pos) const {
-  // x: [seq_len, embed_dim] (seq_len = prompt length during prefill, 1 during
-  // decode)
+Tensor Attention::forward(const Tensor &x, int32_t start_pos,
+                          KVCacheManager &kv_cache, int64_t seq_id) const {
+  // x: [seq_len, embed_dim]
   int64_t seq_len = x.size(0);
   int32_t num_heads = config_.num_heads;
   int32_t num_kv_heads = config_.num_kv_heads;
@@ -85,22 +76,18 @@ Tensor Attention::forward(const Tensor &x, int32_t start_pos) const {
   K_new =
       ops::rope(K_new.unsqueeze(0), positions, config_.rope_theta).squeeze(0);
 
-  // --- Step 4: Update KV cache ---
-  // During prefill (start_pos == 0): replace cache with new K/V.
-  // During decode (start_pos > 0): concatenate new K/V to cached state.
-  if (start_pos == 0) {
-    k_cache_ = K_new.contiguous();
-    v_cache_ = V_new.contiguous();
-  } else {
-    // Concatenate along the sequence dimension (dim 0).
-    k_cache_ = Tensor::cat({k_cache_, K_new.contiguous()}, 0);
-    v_cache_ = Tensor::cat({v_cache_, V_new.contiguous()}, 0);
+  // --- Step 4: Update paged KV cache ---
+  // Append each new token's K/V data to the cache.
+  for (int64_t t = 0; t < seq_len; ++t) {
+    // Extract K and V for this token: [num_kv_heads, head_dim]
+    Tensor k_token = K_new.select(0, t).contiguous();
+    Tensor v_token = V_new.select(0, t).contiguous();
+    kv_cache.AppendToken(seq_id, layer_idx_, k_token, v_token);
   }
 
-  // K and V for attention are the full cached history.
-  Tensor K = k_cache_; // [total_seq, num_kv_heads, head_dim]
-  Tensor V = v_cache_; // [total_seq, num_kv_heads, head_dim]
-  int64_t kv_len = K.size(0);
+  // Retrieve the full cached K/V history from the page table.
+  Tensor K = kv_cache.GetKeys(seq_id, layer_idx_);
+  Tensor V = kv_cache.GetValues(seq_id, layer_idx_);
 
   // --- Step 5: GQA expansion ---
   if (num_groups > 1) {
@@ -109,35 +96,24 @@ Tensor Attention::forward(const Tensor &x, int32_t start_pos) const {
   }
 
   // --- Step 6: FlashAttention ---
-  // flash_attention expects [seq_q, num_heads, head_dim] for Q
-  // and [seq_kv, num_heads, head_dim] for K,V (already GQA-expanded).
   float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
-
-  // Causal masking: during prefill (start_pos==0), we need causal mask.
-  // During decode (seq_len_q==1), causal has no effect since there's only
-  // one query position.
   Tensor output = flash_attention(Q, K, V, scale, /*causal=*/true);
 
   // --- Step 7: Concatenate heads and project ---
-  // output: [seq_len, num_heads, head_dim] -> [seq_len, embed_dim]
   Tensor concat =
       output.reshape({seq_len, static_cast<int64_t>(num_heads * head_dim)});
   return ops::matmul(concat, wo_t);
 }
 
-void Attention::ClearCache() const {
-  k_cache_ = Tensor();
-  v_cache_ = Tensor();
-}
-
 // ============================================================================
 // TransformerBlock::forward
 // ============================================================================
-//   x = x + attn(attn_norm(x), start_pos)   // Attention with residual
-//   x = x + ffn(ffn_norm(x))                // FFN with residual
-Tensor TransformerBlock::forward(const Tensor &x, int32_t start_pos) const {
+Tensor TransformerBlock::forward(const Tensor &x, int32_t start_pos,
+                                 KVCacheManager &kv_cache,
+                                 int64_t seq_id) const {
   // Pre-norm attention with residual connection.
-  Tensor attn_out = attn_.forward(attn_norm_.forward(x), start_pos);
+  Tensor attn_out =
+      attn_.forward(attn_norm_.forward(x), start_pos, kv_cache, seq_id);
   Tensor residual1 = ops::add(x, attn_out);
 
   // Pre-norm FFN with residual connection.
@@ -146,18 +122,32 @@ Tensor TransformerBlock::forward(const Tensor &x, int32_t start_pos) const {
 }
 
 // ============================================================================
+// GemmaModel constructor — creates paged KV cache
+// ============================================================================
+GemmaModel::GemmaModel(GemmaConfig config, Tensor token_embedding,
+                       std::vector<TransformerBlock> layers, RMSNorm final_norm)
+    : config_(std::move(config)), token_embedding_(std::move(token_embedding)),
+      layers_(std::move(layers)), final_norm_(std::move(final_norm)) {
+  // Compute max blocks needed: max_seq_len / block_size, per layer.
+  // Add extra blocks for headroom.
+  int32_t blocks_per_seq =
+      (config_.max_seq_len + kDefaultBlockSize - 1) / kDefaultBlockSize;
+  int32_t max_blocks = blocks_per_seq * config_.num_layers + config_.num_layers;
+
+  kv_cache_ = std::make_unique<KVCacheManager>(
+      config_.num_layers, config_.num_kv_heads, config_.head_dim, max_blocks,
+      kDefaultBlockSize);
+
+  // Allocate an initial sequence.
+  seq_id_ = kv_cache_->AllocateSequence();
+}
+
+// ============================================================================
 // GemmaModel::forward
 // ============================================================================
-//   1. Embed tokens
-//   2. Scale by sqrt(embed_dim)  (Gemma-specific)
-//   3. Run through all transformer blocks
-//   4. Final RMS norm
-//   5. Compute logits via weight tying (embed^T)
-//   6. Return logits for the last position
 Tensor GemmaModel::forward(const Tensor &tokens, int32_t start_pos) const {
   // Step 1: Token embedding lookup.
-  // tokens is a 1D tensor of int token IDs.
-  Tensor x = ops::embedding(token_embedding_, tokens); // [seq_len, embed_dim]
+  Tensor x = ops::embedding(token_embedding_, tokens);
 
   // Step 2: Gemma-specific embedding scaling.
   float scale = std::sqrt(static_cast<float>(config_.embed_dim));
@@ -166,34 +156,32 @@ Tensor GemmaModel::forward(const Tensor &tokens, int32_t start_pos) const {
     x_ptr[i] *= scale;
   }
 
-  // Step 3: Run through transformer blocks.
-  for (const auto &block : layers_) {
-    x = block.forward(x, start_pos);
+  // Step 3: Run through transformer blocks with paged KV cache.
+  for (auto &block : layers_) {
+    x = block.forward(x, start_pos, *kv_cache_, seq_id_);
   }
 
   // Step 4: Final normalization.
   x = final_norm_.forward(x);
 
   // Step 5: Compute logits via weight tying.
-  // logits = x @ embedding_table^T
-  // embedding_table: [vocab_size, embed_dim]
-  // x (last position): [embed_dim]
-  // logits: [vocab_size]
   int64_t seq_len = x.size(0);
-  Tensor last_hidden = x.select(0, seq_len - 1).contiguous(); // [embed_dim]
-
-  // Reshape to [1, embed_dim] for matmul.
+  Tensor last_hidden = x.select(0, seq_len - 1).contiguous();
   last_hidden =
       last_hidden.reshape({1, static_cast<int64_t>(config_.embed_dim)});
-
-  // embedding^T: [embed_dim, vocab_size]
   Tensor embed_t = token_embedding_.transpose(0, 1).contiguous();
-
-  // logits = [1, vocab_size]
   Tensor logits = ops::matmul(last_hidden, embed_t);
-
-  // Squeeze to [vocab_size]
   return logits.reshape({static_cast<int64_t>(config_.vocab_size)});
+}
+
+// ============================================================================
+// GemmaModel::ClearCache
+// ============================================================================
+void GemmaModel::ClearCache() const {
+  if (kv_cache_ && seq_id_ >= 0) {
+    kv_cache_->FreeSequence(seq_id_);
+    seq_id_ = kv_cache_->AllocateSequence();
+  }
 }
 
 } // namespace ie
