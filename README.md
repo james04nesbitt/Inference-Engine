@@ -8,6 +8,7 @@ A standalone, high-performance C++20 inference runtime built from scratch for th
 * **SIMD-Accelerated Compute**: Custom GEMM/GEMV kernels optimized with Google Highway supporting AVX2, AVX-512, and NEON. Achieves up to 4x speedup over naive FP32 baselines through cache-aware tiling (64x64 blocks), software prefetching, and multi-threaded row partitioning via a custom thread pool.
 * **Optimized Attention Memory**: Integrates FlashAttention (tiled Q×K with online softmax) and a PagedAttention-style KV cache manager. Features block-level allocation, per-sequence page tables, and copy-on-write support to reduce attention memory complexity to O(N) and boost multi-sequence throughput under heavy load.
 * **INT8 KV Cache Quantization**: Outlier-aware INT8 quantization with per-channel scaling and mixed-precision handling (FP16 for outlier channels, INT8 for the rest). Reduces the KV cache memory footprint by ~50% with less than 0.5% perplexity degradation.
+* **Continuous Batching**: Round-robin batch scheduler with dynamic request management, per-sequence paged KV cache allocation, and streaming token callbacks for concurrent multi-request serving.
 
 
 ## Architecture
@@ -26,6 +27,7 @@ A standalone, high-performance C++20 inference runtime built from scratch for th
 │   ├── gguf/             # GGUF file parser (binary I/O, weight loading)
 │   ├── tokenizer/        # BPE tokenizer (encode/decode text ↔ token IDs)
 │   ├── model/            # Transformer layers (Attention, FFN, GemmaModel)
+│   ├── scheduler/        # Continuous batching (BatchScheduler)
 │   ├── bench/            # Microbenchmarks (GEMM, GEMV, dot product)
 │   ├── engine.h/cc       # Top-level inference engine (load, generate)
 │   └── main.cc           # CLI entry point
@@ -43,6 +45,12 @@ bazel test //...
 
 # Run inference (CLI)
 bazel run //engine:inference -- --model model/gemma-3-1b-it-f16.gguf --prompt "Hello"
+
+# Interactive mode
+bazel run //engine:inference -- --model model/gemma-3-1b-it-f16.gguf --interactive
+
+# With sampling options
+bazel run //engine:inference -- --model model/gemma-3-1b-it-f16.gguf --prompt "Hello" --temperature 0.8 --top-k 50
 
 # Release build (with optimizations)
 bazel build --config=release //...
@@ -72,39 +80,39 @@ bazel run --config=release //engine/bench:matmul_bench
 Standalone C++ inference runtime for Gemma-3 using Google Highway SIMD. Cache-aware GEMM/GEMV kernels with tiling and prefetching to maximize L2 residency.
 
 #### Phase 1A: Foundations
-- [ ] **Tensor `at()` / `set()`** — Stride-based element access with bounds checking
-- [ ] **Tensor `reshape()` / `view()`** — Shape manipulation (share data via `shared_ptr`)
-- [ ] **GGUF metadata parser** — Read key-value pairs from binary GGUF
-- [ ] **GGUF tensor info parser** — Read tensor names, shapes, offsets
-- [ ] **`ops::add()`, `ops::mul()`** — Element-wise operations with broadcasting
+- [x] **Tensor `at()` / `set()`** — Stride-based element access with bounds checking
+- [x] **Tensor `reshape()` / `view()`** — Shape manipulation (share data via `shared_ptr`)
+- [x] **GGUF metadata parser** — Read key-value pairs from binary GGUF
+- [x] **GGUF tensor info parser** — Read tensor names, shapes, offsets
+- [x] **`ops::add()`, `ops::mul()`** — Element-wise operations with broadcasting
 
 #### Phase 1B: Core Kernels
-- [ ] **`ops::matmul()` — Naive** — i,j,k triple loop (correct baseline)
-- [ ] **`ops::matmul()` — Cache-friendly** — Reorder to i,k,j for sequential B access
-- [ ] **`ops::matmul()` — Tiled** — L2-aware blocking (64×64 tiles for 256KB L2)
-- [ ] **`ops::matmul()` — SIMD** — Highway vectorized inner loop (`hn::MulAdd`)
-- [ ] **`ops::matmul()` — Multi-threaded** — Partition M dimension across thread pool
-- [ ] **`ops::rms_norm()`** — RMS normalization
-- [ ] **`ops::silu()`** — SiLU activation
-- [ ] **`ops::softmax()`** — Numerically stable softmax
-- [ ] **`ops::embedding()`** — Embedding table lookup
-- [ ] **`ops::rope()`** — Rotary positional embeddings
-- [ ] **Benchmark GEMM** — Measure tokens/sec at each optimization stage
+- [x] **`ops::matmul()` — Naive** — i,j,k triple loop (correct baseline)
+- [x] **`ops::matmul()` — Cache-friendly** — Reorder to i,k,j for sequential B access
+- [x] **`ops::matmul()` — Tiled** — L2-aware blocking (64×64 tiles for 256KB L2)
+- [x] **`ops::matmul()` — SIMD** — Highway vectorized inner loop (`hn::MulAdd`)
+- [x] **`ops::matmul()` — Multi-threaded** — Partition M dimension across thread pool
+- [x] **`ops::rms_norm()`** — RMS normalization
+- [x] **`ops::silu()`** — SiLU activation
+- [x] **`ops::softmax()`** — Numerically stable softmax
+- [x] **`ops::embedding()`** — Embedding table lookup
+- [x] **`ops::rope()`** — Rotary positional embeddings
+- [x] **Benchmark GEMM** — Measure tokens/sec at each optimization stage
 
 #### Phase 1C: Model Forward Pass
-- [ ] **GGUF tensor loading** — Load F16/F32 weight data into Tensors
-- [ ] **Build tokenizer from GGUF** — Extract vocab, scores, special tokens
-- [ ] **`RMSNorm::forward()`** — First layer implementation
-- [ ] **`FeedForward::forward()`** — SwiGLU FFN
-- [ ] **`Attention::forward()`** — Multi-head attention with GQA
-- [ ] **`TransformerBlock::forward()`** — Attention + FFN + residuals
-- [ ] **`GemmaModel::forward()`** — Full model: embed → blocks → logits
+- [x] **GGUF tensor loading** — Load F16/F32 weight data into Tensors
+- [x] **Build tokenizer from GGUF** — Extract vocab, scores, special tokens
+- [x] **`RMSNorm::forward()`** — First layer implementation
+- [x] **`FeedForward::forward()`** — SwiGLU FFN
+- [x] **`Attention::forward()`** — Multi-head attention with GQA
+- [x] **`TransformerBlock::forward()`** — Attention + FFN + residuals
+- [x] **`GemmaModel::forward()`** — Full model: embed → blocks → logits
 
 #### Phase 1D: Generation
-- [ ] **Greedy sampling** — argmax over logits
-- [ ] **Temperature + Top-K/Top-P sampling**
-- [ ] **Autoregressive loop** — Generate tokens one at a time
-- [ ] **Basic KV-cache** — Avoid recomputing attention for past tokens
+- [x] **Greedy sampling** — argmax over logits
+- [x] **Temperature + Top-K/Top-P sampling**
+- [x] **Autoregressive loop** — Generate tokens one at a time
+- [x] **Basic KV-cache** — Avoid recomputing attention for past tokens
 
 ---
 
@@ -113,22 +121,22 @@ Standalone C++ inference runtime for Gemma-3 using Google Highway SIMD. Cache-aw
 PagedAttention-style KV cache manager with continuous batching and dynamic request scheduling, eliminating pipeline bubbles and maximizing throughput.
 
 #### Phase 2A: Paged KV Cache
-- [ ] **KV cache block allocator** — Fixed-size page pool with free list
-- [ ] **Block table manager** — Per-sequence logical→physical page mapping
-- [ ] **Append/lookup operations** — Efficient page-table-based KV access
-- [ ] **Copy-on-write** — Enable beam search without KV duplication
+- [x] **KV cache block allocator** — Fixed-size page pool with free list
+- [x] **Block table manager** — Per-sequence logical→physical page mapping
+- [x] **Append/lookup operations** — Efficient page-table-based KV access
+- [x] **Copy-on-write** — Enable beam search without KV duplication
 
 #### Phase 2B: FlashAttention
-- [ ] **Tiled attention** — Block-level Q×K computation in SRAM
-- [ ] **Online softmax** — Incremental normalization without full attention matrix
-- [ ] **Causal masking** — Efficient tile-level mask application
-- [ ] **Fused RoPE** — Apply rotary embeddings inside the tiling loop
+- [x] **Tiled attention** — Block-level Q×K computation in SRAM
+- [x] **Online softmax** — Incremental normalization without full attention matrix
+- [x] **Causal masking** — Efficient tile-level mask application
+- [x] **Fused RoPE** — Apply rotary embeddings inside the tiling loop
 
-#### Phase 2C: Scheduling & Batching *(Stretch)*
-- [ ] **Request queue** — Priority-based scheduling with fairness
-- [ ] **Dynamic batch formation** — Iteration-level batching of sequences
-- [ ] **Preemption** — Pause/resume sequences when memory pressure is high
-- [ ] **Pipeline bubble elimination** — Keep GPU/CPU saturated across batches
+#### Phase 2C: Scheduling & Batching
+- [x] **Request queue** — Priority-based scheduling with fairness
+- [x] **Dynamic batch formation** — Iteration-level batching of sequences
+- [x] **Preemption** — Pause/resume sequences when memory pressure is high
+- [x] **Pipeline bubble elimination** — Keep GPU/CPU saturated across batches
 
 ---
 
@@ -137,19 +145,19 @@ PagedAttention-style KV cache manager with continuous batching and dynamic reque
 Outlier-aware INT8 KV cache quantization with per-channel scaling, reducing memory footprint by 50% while maintaining <0.1% perplexity degradation.
 
 #### Phase 3A: INT8 Fundamentals
-- [ ] **Per-channel scale computation** — Analyze weight/activation distributions
-- [ ] **Quantize/dequantize** — INT8 ↔ FP32 conversion with scale + zero_point
-- [ ] **Quantized matmul** — Mixed-precision GEMM (FP32 × INT8)
-- [ ] **Accuracy validation** — Compare quantized vs FP32 outputs
+- [x] **Per-channel scale computation** — Analyze weight/activation distributions
+- [x] **Quantize/dequantize** — INT8 ↔ FP32 conversion with scale + zero_point
+- [x] **Quantized matmul** — Mixed-precision GEMM (FP32 × INT8)
+- [x] **Accuracy validation** — Compare quantized vs FP32 outputs
 
 #### Phase 3B: KV Cache Quantization
-- [ ] **Outlier detection** — Identify channels with disproportionately large values
-- [ ] **Mixed-precision KV cache** — INT8 for normal channels, FP16 for outliers
-- [ ] **Perplexity benchmarking** — Measure degradation on validation set
-- [ ] **Memory accounting** — Track and report compression ratios
+- [x] **Outlier detection** — Identify channels with disproportionately large values
+- [x] **Mixed-precision KV cache** — INT8 for normal channels, FP16 for outliers
+- [x] **Perplexity benchmarking** — Measure degradation on validation set
+- [x] **Memory accounting** — Track and report compression ratios
 
-#### Phase 3C: Advanced Quantization *(Stretch)*
-- [ ] **GGUF quantized format support** — Q4_0, Q4_K_M, Q8_0 dequantization
+#### Phase 3C: Advanced Quantization
+- [x] **GGUF quantized format support** — Q4_0, Q8_0 dequantization
 - [ ] **SmoothQuant** — Redistribute outlier magnitude from activations to weights
 - [ ] **AVX-512 VNNI** — INT8 dot product instructions for 2x GEMM throughput
 

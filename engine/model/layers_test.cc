@@ -3,6 +3,7 @@
 #include <cmath>
 #include <vector>
 
+#include "engine/attention/kv_cache.h"
 #include "engine/ops/ops.h"
 #include "engine/tensor/tensor.h"
 #include "gtest/gtest.h"
@@ -15,18 +16,16 @@ namespace {
 // ============================================================================
 
 TEST(RMSNorm, BasicNormalization) {
-  // Weight of all ones — just normalizes by RMS.
   Tensor weight = Tensor::ones({4});
   RMSNorm norm(weight, 1e-6f);
 
   Tensor x = Tensor::from_vector({3.0f, 4.0f, 0.0f, 0.0f});
-  x = x.reshape({1, 4}); // [1, 4]
+  x = x.reshape({1, 4});
 
   Tensor out = norm.forward(x);
   EXPECT_EQ(out.size(0), 1);
   EXPECT_EQ(out.size(1), 4);
 
-  // rms = sqrt(mean(x^2)) = sqrt((9+16+0+0)/4) = sqrt(6.25) = 2.5
   float rms = std::sqrt(6.25f);
   EXPECT_NEAR(out.at({0, 0}), 3.0f / rms, 1e-4f);
   EXPECT_NEAR(out.at({0, 1}), 4.0f / rms, 1e-4f);
@@ -68,7 +67,7 @@ TEST(FeedForward, SmallSwiGLU) {
 }
 
 // ============================================================================
-// TransformerBlock Tests (with Paged KV Cache)
+// TransformerBlock Tests (with externally-provided KV cache)
 // ============================================================================
 
 TEST(TransformerBlock, SmallBlock) {
@@ -101,13 +100,12 @@ TEST(TransformerBlock, SmallBlock) {
   TransformerBlock block(config, /*layer_idx=*/0, std::move(attn_norm),
                          std::move(attn), std::move(ffn_norm), std::move(ffn));
 
-  // Create a KV cache manager for this test.
+  // Create external KV cache.
   KVCacheManager kv_cache(/*num_layers=*/1, /*num_kv_heads=*/1,
                           /*head_dim=*/4, /*max_blocks=*/20,
                           /*block_size=*/16);
   int64_t seq_id = kv_cache.AllocateSequence();
 
-  // Input: [2, 4] (seq_len=2, embed_dim=4)
   Tensor x = Tensor::ones({2, 4});
   Tensor out = block.forward(x, 0, kv_cache, seq_id);
 

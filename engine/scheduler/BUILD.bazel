@@ -1,0 +1,27 @@
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
+
+cc_library(
+    name = "scheduler",
+    srcs = ["batch_scheduler.cc"],
+    hdrs = ["batch_scheduler.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//engine/attention",
+        "//engine/model",
+        "//engine/tensor",
+        "//engine/tokenizer",
+    ],
+)
+
+cc_test(
+    name = "batch_scheduler_test",
+    srcs = ["batch_scheduler_test.cc"],
+    deps = [
+        ":scheduler",
+        "//engine/attention",
+        "//engine/model",
+        "//engine/tensor",
+        "//engine/tokenizer",
+        "@googletest//:gtest_main",
+    ],
+)

@@ -10,6 +10,7 @@
 #include <stdexcept>
 
 #include "engine/ops/ops.h"
+#include "engine/scheduler/batch_scheduler.h"
 #include "engine/tokenizer/bpe_tokenizer.h"
 
 namespace ie {
@@ -37,7 +38,7 @@ bool InferenceEngine::LoadModel(const std::string &model_path) {
 }
 
 // ============================================================================
-// Generate — One-shot generation (convenience wrapper)
+// Generate — One-shot generation
 // ============================================================================
 std::string InferenceEngine::Generate(const std::string &prompt,
                                       int32_t max_tokens) {
@@ -53,17 +54,23 @@ std::string InferenceEngine::GenerateStreaming(
     const std::string &prompt, int32_t max_tokens,
     const SamplingConfig &sampling_config,
     std::function<void(const std::string &)> on_token) {
-  if (!model_ || !tokenizer_) {
+  if (!model_ || !tokenizer_ || !kv_cache_) {
     throw std::runtime_error(
         "Model or tokenizer not loaded. Call LoadModel() first.");
   }
 
-  // Step 1: Tokenize the prompt and prepend BOS.
+  // Allocate a fresh sequence in the KV cache.
+  if (seq_id_ >= 0) {
+    kv_cache_->FreeSequence(seq_id_);
+  }
+  seq_id_ = kv_cache_->AllocateSequence();
+
+  // Step 1: Tokenize and prepend BOS.
   std::vector<int32_t> tokens = tokenizer_->Encode(prompt);
   tokens.insert(tokens.begin(), tokenizer_->BosId());
   int32_t prompt_len = static_cast<int32_t>(tokens.size());
 
-  // Step 2: Prefill — run the full prompt through the model.
+  // Step 2: Prefill.
   std::vector<float> token_floats(tokens.size());
   for (size_t i = 0; i < tokens.size(); ++i) {
     token_floats[i] = static_cast<float>(tokens[i]);
@@ -72,23 +79,23 @@ std::string InferenceEngine::GenerateStreaming(
 
   auto t_start = std::chrono::high_resolution_clock::now();
 
-  Tensor logits = model_->forward(input_tensor, /*start_pos=*/0);
+  Tensor logits =
+      model_->forward(input_tensor, /*start_pos=*/0, *kv_cache_, seq_id_);
 
   auto t_prefill = std::chrono::high_resolution_clock::now();
   double prefill_ms =
       std::chrono::duration<double, std::milli>(t_prefill - t_start).count();
 
-  // Step 3: Sample the first generated token.
+  // Step 3: Sample first token.
   int32_t next_token = Sample(logits, sampling_config);
   tokens.push_back(next_token);
 
-  // Decode and stream the first token.
   if (on_token) {
     std::string decoded = tokenizer_->Decode({next_token});
     on_token(decoded);
   }
 
-  // Step 4: Autoregressive decode loop with KV cache.
+  // Step 4: Autoregressive decode.
   int32_t generated_count = 1;
   for (int32_t i = 1; i < max_tokens; ++i) {
     if (next_token == tokenizer_->EosId()) {
@@ -97,13 +104,12 @@ std::string InferenceEngine::GenerateStreaming(
 
     Tensor single_token = Tensor::from_vector({static_cast<float>(next_token)});
     int32_t start_pos = prompt_len + i - 1;
-    logits = model_->forward(single_token, start_pos);
+    logits = model_->forward(single_token, start_pos, *kv_cache_, seq_id_);
 
     next_token = Sample(logits, sampling_config);
     tokens.push_back(next_token);
     generated_count++;
 
-    // Stream decoded token.
     if (on_token) {
       std::string decoded = tokenizer_->Decode({next_token});
       on_token(decoded);
@@ -116,7 +122,6 @@ std::string InferenceEngine::GenerateStreaming(
   double decode_ms =
       std::chrono::duration<double, std::milli>(t_end - t_prefill).count();
 
-  // Print timing stats.
   double tokens_per_sec =
       (decode_ms > 0) ? (generated_count * 1000.0 / decode_ms) : 0;
   std::cerr << "\n\n--- Stats ---"
@@ -128,14 +133,49 @@ std::string InferenceEngine::GenerateStreaming(
             << "\n  Tokens/sec:     " << std::fixed << std::setprecision(2)
             << tokens_per_sec << std::endl;
 
-  // Step 5: Decode all tokens (skip BOS).
   std::vector<int32_t> output_tokens(tokens.begin() + 1, tokens.end());
   return tokenizer_->Decode(output_tokens);
 }
 
+// ============================================================================
+// GenerateBatch — Multiple prompts via BatchScheduler
+// ============================================================================
+void InferenceEngine::GenerateBatch(
+    const std::vector<std::string> &prompts, int32_t max_tokens,
+    const SamplingConfig &config,
+    std::function<void(int32_t idx, const std::string &token)> on_token,
+    std::function<void(int32_t idx, const std::string &result)> on_complete) {
+  if (!model_ || !tokenizer_ || !kv_cache_) {
+    throw std::runtime_error(
+        "Model or tokenizer not loaded. Call LoadModel() first.");
+  }
+
+  BatchScheduler scheduler(*model_, *tokenizer_, *kv_cache_);
+
+  for (int32_t i = 0; i < static_cast<int32_t>(prompts.size()); ++i) {
+    Request req;
+    req.prompt = prompts[i];
+    req.max_tokens = max_tokens;
+    if (on_token) {
+      req.on_token = [on_token, i](const std::string &tok) {
+        on_token(i, tok);
+      };
+    }
+    if (on_complete) {
+      req.on_complete = [on_complete, i](const std::string &result) {
+        on_complete(i, result);
+      };
+    }
+    scheduler.AddRequest(std::move(req));
+  }
+
+  scheduler.Run();
+}
+
 void InferenceEngine::ClearCache() {
-  if (model_) {
-    model_->ClearCache();
+  if (kv_cache_ && seq_id_ >= 0) {
+    kv_cache_->FreeSequence(seq_id_);
+    seq_id_ = -1;
   }
 }
 
@@ -222,8 +262,19 @@ bool InferenceEngine::BuildModel() {
       std::make_unique<GemmaModel>(config_, std::move(token_embedding),
                                    std::move(layers), std::move(final_norm));
 
-  std::cout << "Model built successfully (" << config_.num_layers << " layers)"
-            << std::endl;
+  // Create the paged KV cache.
+  int32_t blocks_per_seq =
+      (config_.max_seq_len + kDefaultBlockSize - 1) / kDefaultBlockSize;
+  // Allocate enough blocks for a few concurrent sequences.
+  int32_t max_blocks =
+      blocks_per_seq * config_.num_layers * 4 + config_.num_layers;
+
+  kv_cache_ = std::make_unique<KVCacheManager>(
+      config_.num_layers, config_.num_kv_heads, config_.head_dim, max_blocks,
+      kDefaultBlockSize);
+
+  std::cout << "Model built successfully (" << config_.num_layers << " layers, "
+            << max_blocks << " KV cache blocks)" << std::endl;
   return true;
 }
 

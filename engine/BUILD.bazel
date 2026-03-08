@@ -6,9 +6,11 @@ cc_library(
     hdrs = ["engine.h"],
     visibility = ["//visibility:public"],
     deps = [
+        "//engine/attention",
         "//engine/gguf",
         "//engine/model",
         "//engine/ops",
+        "//engine/scheduler",
         "//engine/tensor",
         "//engine/tokenizer",
     ],
