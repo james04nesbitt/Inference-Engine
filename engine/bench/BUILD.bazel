@@ -8,3 +8,50 @@ cc_binary(
         "//engine/compute",
     ],
 )
+
+cc_binary(
+    name = "simd_bench",
+    srcs = ["simd_bench.cc"],
+    defines = ["HWY_STATIC_DEFINE"],
+    deps = [
+        "//engine/compute",
+    ],
+)
+
+cc_binary(
+    name = "attention_bench",
+    srcs = ["attention_bench.cc"],
+    deps = [
+        "//engine/attention",
+        "//engine/tensor",
+    ],
+)
+
+cc_binary(
+    name = "kv_cache_bench",
+    srcs = ["kv_cache_bench.cc"],
+    deps = [
+        "//engine/attention",
+        "//engine/tensor",
+    ],
+)
+
+cc_binary(
+    name = "quantize_bench",
+    srcs = ["quantize_bench.cc"],
+    deps = [
+        "//engine/quantize",
+        "//engine/tensor",
+    ],
+)
+
+cc_binary(
+    name = "inference_bench",
+    srcs = ["inference_bench.cc"],
+    deps = [
+        "//engine/attention",
+        "//engine/model",
+        "//engine/ops",
+        "//engine/tensor",
+    ],
+)
