@@ -73,93 +73,27 @@ bazel run --config=release //engine/bench:matmul_bench
 
 ---
 
-## 🗺️ Implementation Roadmap
+## Performance Benchmarks
 
-### Pillar 1: High-Performance Kernels
+The engine has been heavily optimized for throughput and latency, leveraging MSVC AVX2 compilation, locked memory caching, and zero-allocation hot paths.
 
-Standalone C++ inference runtime for Gemma-3 using Google Highway SIMD. Cache-aware GEMM/GEMV kernels with tiling and prefetching to maximize L2 residency.
+### End-To-End Inference Throughput (Gemma-3 1B)
+- **Prefill Speed:** ~9.3 tokens/sec (Time-to-First-Token: 440ms for 4 tokens, 1727ms for 16 tokens)
+- **Decode Speed:** **7.63 tokens/sec**
+- **Per-Layer Average Latency:** 5.04 ms
+- **Full Forward Pass:** 131.0 ms
 
-#### Phase 1A: Foundations
-- [x] **Tensor `at()` / `set()`** — Stride-based element access with bounds checking
-- [x] **Tensor `reshape()` / `view()`** — Shape manipulation (share data via `shared_ptr`)
-- [x] **GGUF metadata parser** — Read key-value pairs from binary GGUF
-- [x] **GGUF tensor info parser** — Read tensor names, shapes, offsets
-- [x] **`ops::add()`, `ops::mul()`** — Element-wise operations with broadcasting
+### SIMD Compute & Matmul
+Highway SIMD + Threaded kernels show massive speedups over scalar baselines.
+- **Large GEMM (1024x1024x1024):** 21.67 ms (99.09 GFLOPS) — *27.9x Speedup*
+- **Q/K/V Projection (16x1152x1024):** 0.49 ms (77.53 GFLOPS) — *22x Speedup*
 
-#### Phase 1B: Core Kernels
-- [x] **`ops::matmul()` — Naive** — i,j,k triple loop (correct baseline)
-- [x] **`ops::matmul()` — Cache-friendly** — Reorder to i,k,j for sequential B access
-- [x] **`ops::matmul()` — Tiled** — L2-aware blocking (64×64 tiles for 256KB L2)
-- [x] **`ops::matmul()` — SIMD** — Highway vectorized inner loop (`hn::MulAdd`)
-- [x] **`ops::matmul()` — Multi-threaded** — Partition M dimension across thread pool
-- [x] **`ops::rms_norm()`** — RMS normalization
-- [x] **`ops::silu()`** — SiLU activation
-- [x] **`ops::softmax()`** — Numerically stable softmax
-- [x] **`ops::embedding()`** — Embedding table lookup
-- [x] **`ops::rope()`** — Rotary positional embeddings
-- [x] **Benchmark GEMM** — Measure tokens/sec at each optimization stage
-
-#### Phase 1C: Model Forward Pass
-- [x] **GGUF tensor loading** — Load F16/F32 weight data into Tensors
-- [x] **Build tokenizer from GGUF** — Extract vocab, scores, special tokens
-- [x] **`RMSNorm::forward()`** — First layer implementation
-- [x] **`FeedForward::forward()`** — SwiGLU FFN
-- [x] **`Attention::forward()`** — Multi-head attention with GQA
-- [x] **`TransformerBlock::forward()`** — Attention + FFN + residuals
-- [x] **`GemmaModel::forward()`** — Full model: embed → blocks → logits
-
-#### Phase 1D: Generation
-- [x] **Greedy sampling** — argmax over logits
-- [x] **Temperature + Top-K/Top-P sampling**
-- [x] **Autoregressive loop** — Generate tokens one at a time
-- [x] **Basic KV-cache** — Avoid recomputing attention for past tokens
-
----
-
-### Pillar 2: Memory Scheduling & Batching
-
-PagedAttention-style KV cache manager with continuous batching and dynamic request scheduling, eliminating pipeline bubbles and maximizing throughput.
-
-#### Phase 2A: Paged KV Cache
-- [x] **KV cache block allocator** — Fixed-size page pool with free list
-- [x] **Block table manager** — Per-sequence logical→physical page mapping
-- [x] **Append/lookup operations** — Efficient page-table-based KV access
-- [x] **Copy-on-write** — Enable beam search without KV duplication
-
-#### Phase 2B: FlashAttention
-- [x] **Tiled attention** — Block-level Q×K computation in SRAM
-- [x] **Online softmax** — Incremental normalization without full attention matrix
-- [x] **Causal masking** — Efficient tile-level mask application
-- [x] **Fused RoPE** — Apply rotary embeddings inside the tiling loop
-
-#### Phase 2C: Scheduling & Batching
-- [x] **Request queue** — Priority-based scheduling with fairness
-- [x] **Dynamic batch formation** — Iteration-level batching of sequences
-- [x] **Preemption** — Pause/resume sequences when memory pressure is high
-- [x] **Pipeline bubble elimination** — Keep GPU/CPU saturated across batches
-
----
-
-### Pillar 3: Quantization
-
-Outlier-aware INT8 KV cache quantization with per-channel scaling, reducing memory footprint by 50% while maintaining <0.1% perplexity degradation.
-
-#### Phase 3A: INT8 Fundamentals
-- [x] **Per-channel scale computation** — Analyze weight/activation distributions
-- [x] **Quantize/dequantize** — INT8 ↔ FP32 conversion with scale + zero_point
-- [x] **Quantized matmul** — Mixed-precision GEMM (FP32 × INT8)
-- [x] **Accuracy validation** — Compare quantized vs FP32 outputs
-
-#### Phase 3B: KV Cache Quantization
-- [x] **Outlier detection** — Identify channels with disproportionately large values
-- [x] **Mixed-precision KV cache** — INT8 for normal channels, FP16 for outliers
-- [x] **Perplexity benchmarking** — Measure degradation on validation set
-- [x] **Memory accounting** — Track and report compression ratios
-
-#### Phase 3C: Advanced Quantization
-- [x] **GGUF quantized format support** — Q4_0, Q8_0 dequantization
-- [ ] **SmoothQuant** — Redistribute outlier magnitude from activations to weights
-- [ ] **AVX-512 VNNI** — INT8 dot product instructions for 2x GEMM throughput
+### FlashAttention & INT8 KV Cache
+- **Memory Footprint (SeqLen 2048):**
+  - FP32: 104.00 MB
+  - INT8: **26.13 MB** *(74.9% Savings)*
+- **Flash vs Naive Latency (SeqLen 512):** Flash is 1.1x faster with a 3.0x peak memory reduction.
+- **KV Append Overhead:** 4.5 µs/token (220k tokens/sec)
 
 ---
 
