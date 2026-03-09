@@ -1,6 +1,6 @@
-load("@rules_cc//cc:defs.bzl", "cc_binary")
+load("@rules_cc//cc:defs.bzl", "cc_test")
 
-cc_binary(
+cc_test(
     name = "matmul_bench",
     srcs = ["matmul_bench.cc"],
     defines = ["HWY_STATIC_DEFINE"],
@@ -9,7 +9,7 @@ cc_binary(
     ],
 )
 
-cc_binary(
+cc_test(
     name = "simd_bench",
     srcs = ["simd_bench.cc"],
     defines = ["HWY_STATIC_DEFINE"],
@@ -18,7 +18,7 @@ cc_binary(
     ],
 )
 
-cc_binary(
+cc_test(
     name = "attention_bench",
     srcs = ["attention_bench.cc"],
     deps = [
@@ -27,7 +27,7 @@ cc_binary(
     ],
 )
 
-cc_binary(
+cc_test(
     name = "kv_cache_bench",
     srcs = ["kv_cache_bench.cc"],
     deps = [
@@ -36,7 +36,7 @@ cc_binary(
     ],
 )
 
-cc_binary(
+cc_test(
     name = "quantize_bench",
     srcs = ["quantize_bench.cc"],
     deps = [
@@ -45,7 +45,7 @@ cc_binary(
     ],
 )
 
-cc_binary(
+cc_test(
     name = "inference_bench",
     srcs = ["inference_bench.cc"],
     deps = [

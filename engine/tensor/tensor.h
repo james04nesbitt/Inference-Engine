@@ -95,8 +95,8 @@ public:
   // Element access — always works in float regardless of storage dtype.
   // Converts to/from the underlying dtype automatically.
   // These are for debugging/testing, NOT for hot paths.
-  float at(std::vector<int64_t> indices) const;
-  void set(std::vector<int64_t> indices, float value);
+  float at(const std::vector<int64_t> &indices) const;
+  void set(const std::vector<int64_t> &indices, float value);
 
   // Compute flat index from multi-dimensional indices.
   int64_t flat_index(const std::vector<int64_t> &indices) const;

@@ -18,13 +18,9 @@ Tensor RMSNorm::forward(const Tensor &x) const {
 // FeedForward::forward — SwiGLU
 // ============================================================================
 Tensor FeedForward::forward(const Tensor &x) const {
-  Tensor gate_t = w_gate_.transpose(0, 1).contiguous();
-  Tensor up_t = w_up_.transpose(0, 1).contiguous();
-  Tensor down_t = w_down_.transpose(0, 1).contiguous();
-
-  Tensor gate = ops::silu(ops::matmul(x, gate_t));
-  Tensor up = ops::matmul(x, up_t);
-  return ops::matmul(ops::mul(gate, up), down_t);
+  Tensor gate = ops::silu(ops::matmul(x, gate_t_));
+  Tensor up = ops::matmul(x, up_t_);
+  return ops::matmul(ops::mul(gate, up), down_t_);
 }
 
 // ============================================================================
@@ -39,14 +35,9 @@ Tensor Attention::forward(const Tensor &x, int32_t start_pos,
   int32_t num_groups = num_heads / num_kv_heads;
 
   // --- Step 1: Project to Q, K, V ---
-  Tensor wq_t = wq_.transpose(0, 1).contiguous();
-  Tensor wk_t = wk_.transpose(0, 1).contiguous();
-  Tensor wv_t = wv_.transpose(0, 1).contiguous();
-  Tensor wo_t = wo_.transpose(0, 1).contiguous();
-
-  Tensor Q = ops::matmul(x, wq_t);
-  Tensor K_new = ops::matmul(x, wk_t);
-  Tensor V_new = ops::matmul(x, wv_t);
+  Tensor Q = ops::matmul(x, wq_t_);
+  Tensor K_new = ops::matmul(x, wk_t_);
+  Tensor V_new = ops::matmul(x, wv_t_);
 
   // --- Step 2: Reshape into heads ---
   Q = Q.reshape({seq_len, num_heads, head_dim});
@@ -86,7 +77,7 @@ Tensor Attention::forward(const Tensor &x, int32_t start_pos,
   // --- Step 7: Concatenate heads and project ---
   Tensor concat =
       output.reshape({seq_len, static_cast<int64_t>(num_heads * head_dim)});
-  return ops::matmul(concat, wo_t);
+  return ops::matmul(concat, wo_t_);
 }
 
 // ============================================================================
@@ -126,8 +117,7 @@ Tensor GemmaModel::forward(const Tensor &tokens, int32_t start_pos,
   Tensor last_hidden = x.select(0, seq_len - 1).contiguous();
   last_hidden =
       last_hidden.reshape({1, static_cast<int64_t>(config_.embed_dim)});
-  Tensor embed_t = token_embedding_.transpose(0, 1).contiguous();
-  Tensor logits = ops::matmul(last_hidden, embed_t);
+  Tensor logits = ops::matmul(last_hidden, embed_t_);
   return logits.reshape({static_cast<int64_t>(config_.vocab_size)});
 }
 

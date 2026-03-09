@@ -73,7 +73,8 @@ Tensor::Tensor(std::vector<int64_t> shape, DType dtype)
   if (alloc_size == 0)
     alloc_size = kAlignment;
 
-  // macOS std::aligned_alloc strictly requires size to be a multiple of alignment
+  // macOS std::aligned_alloc strictly requires size to be a multiple of
+  // alignment
   alloc_size = (alloc_size + kAlignment - 1) & ~(kAlignment - 1);
 
 #ifdef _WIN32
@@ -175,7 +176,7 @@ int64_t Tensor::flat_index(const std::vector<int64_t> &indices) const {
   return idx;
 }
 
-float Tensor::at(std::vector<int64_t> indices) const {
+float Tensor::at(const std::vector<int64_t> &indices) const {
   int64_t idx = flat_index(indices);
   switch (dtype_) {
   case DType::kFloat32:
@@ -188,7 +189,7 @@ float Tensor::at(std::vector<int64_t> indices) const {
   throw std::runtime_error("Unknown dtype");
 }
 
-void Tensor::set(std::vector<int64_t> indices, float value) {
+void Tensor::set(const std::vector<int64_t> &indices, float value) {
   int64_t idx = flat_index(indices);
   switch (dtype_) {
   case DType::kFloat32:
@@ -215,8 +216,8 @@ absl::optional<Tensor> Tensor::view(std::vector<int64_t> new_shape) const {
     return absl::nullopt;
   }
   auto strides = internal::ComputeStrides(new_shape);
-  return Tensor(std::move(new_shape), std::move(strides),
-                dtype_, data_, offset_);
+  return Tensor(std::move(new_shape), std::move(strides), dtype_, data_,
+                offset_);
 }
 
 Tensor Tensor::reshape(std::vector<int64_t> new_shape) const {
@@ -386,8 +387,7 @@ const std::vector<int32_t> &Tensor::zero_points() const { return zero_points_; }
 Tensor Tensor::from_buffer(std::shared_ptr<uint8_t[]> data,
                            std::vector<int64_t> shape, DType dtype) {
   auto strides = internal::ComputeStrides(shape);
-  return Tensor(std::move(shape), std::move(strides), dtype,
-                std::move(data));
+  return Tensor(std::move(shape), std::move(strides), dtype, std::move(data));
 }
 
 Tensor Tensor::from_vector(const std::vector<float> &values) {

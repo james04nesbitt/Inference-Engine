@@ -48,21 +48,21 @@ static ie::GemmaModel BuildSyntheticModel(const ie::GemmaConfig &config) {
   for (int32_t i = 0; i < config.num_layers; ++i) {
     // Attention weights.
     ie::Tensor wq =
-        RandomTensor({config.embed_dim, config.num_heads * config.head_dim});
-    ie::Tensor wk =
-        RandomTensor({config.embed_dim, config.num_kv_heads * config.head_dim});
-    ie::Tensor wv =
-        RandomTensor({config.embed_dim, config.num_kv_heads * config.head_dim});
-    ie::Tensor wo =
         RandomTensor({config.num_heads * config.head_dim, config.embed_dim});
+    ie::Tensor wk =
+        RandomTensor({config.num_kv_heads * config.head_dim, config.embed_dim});
+    ie::Tensor wv =
+        RandomTensor({config.num_kv_heads * config.head_dim, config.embed_dim});
+    ie::Tensor wo =
+        RandomTensor({config.embed_dim, config.num_heads * config.head_dim});
 
     ie::Attention attn(config, i, std::move(wq), std::move(wk), std::move(wv),
                        std::move(wo));
 
     // FFN weights (SwiGLU).
-    ie::Tensor w_gate = RandomTensor({config.embed_dim, config.hidden_dim});
-    ie::Tensor w_up = RandomTensor({config.embed_dim, config.hidden_dim});
-    ie::Tensor w_down = RandomTensor({config.hidden_dim, config.embed_dim});
+    ie::Tensor w_gate = RandomTensor({config.hidden_dim, config.embed_dim});
+    ie::Tensor w_up = RandomTensor({config.hidden_dim, config.embed_dim});
+    ie::Tensor w_down = RandomTensor({config.embed_dim, config.hidden_dim});
     ie::FeedForward ffn(std::move(w_gate), std::move(w_up), std::move(w_down));
 
     // Layer norms.

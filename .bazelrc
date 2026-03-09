@@ -3,40 +3,30 @@
 common --incompatible_autoload_externally=cc_library,cc_binary,cc_test,cc_proto_library,cc_shared_library,cc_import
 
 # =============================================================================
-# C++20 Standard
-#
-# Bazel uses different flags for different compilers:
-#   - MSVC (Windows):       /std:c++20
-#   - Clang/GCC (macOS):    -std=c++20
-#
-# We use platform-specific config to handle different compilers.
-# --enable_platform_specific_config auto-selects --config=macos, --config=windows, etc.
+# Platform Specific Configs
+# =============================================================================
 build --enable_platform_specific_config
+build --macos_minimum_os=14.0
 
-# Default to Clang/GCC flags
-# Require newer macOS to support C++20 features like std::jthread and std::filesystem
-build --cxxopt=-std=c++20 --host_cxxopt=-std=c++20 --macos_minimum_os=14.0
-
-# Overrides for Windows/MSVC
+# =============================================================================
+# C++20 Standard & Native Optimizations
+# =============================================================================
+# Windows (MSVC)
 build:windows --cxxopt=/std:c++20 --host_cxxopt=/std:c++20
+build:windows --cxxopt=/arch:AVX2 --host_cxxopt=/arch:AVX2
 
-# Optimizations for release builds
+# Linux (GCC/Clang)
+build:linux --cxxopt=-std=c++20 --host_cxxopt=-std=c++20
+build:linux --cxxopt=-march=native --host_cxxopt=-march=native
+
+# macOS (Apple Clang)
+build:macos --cxxopt=-std=c++20 --host_cxxopt=-std=c++20
+build:macos --cxxopt=-march=native --host_cxxopt=-march=native
+
+# =============================================================================
+# Build Modes
+# =============================================================================
 build:release --compilation_mode=opt
-
-# Debug builds
 build:debug --compilation_mode=dbg
 
-# Test output
 test --test_output=errors
-
-# =============================================================================
-# SIMD / Native Architecture Optimizations
-#
-# Use --config=avx2 for builds targeting SIMD-accelerated kernels.
-# Highway will auto-detect the best available instruction set, but
-# -march=native tells the compiler to enable all CPU features.
-# =============================================================================
-build:avx2 --cxxopt=-march=native --host_cxxopt=-march=native
-build:avx2 --cxxopt=/arch:AVX2 --host_cxxopt=/arch:AVX2
-
-build:neon --cxxopt=-mcpu=apple-m1 --host_cxxopt=-mcpu=apple-m1
