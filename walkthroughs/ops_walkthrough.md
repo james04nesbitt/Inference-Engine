@@ -320,3 +320,8 @@ While the weights might be INT8 (`Q8_0`) or FP16 coming off the disk or out of t
 1. `std::exp(-x)` can easily underflow FP16.
 2. Accumulating large dot-products in FP16 will overflow the maximum value of `65504`.
 By upcasting to FP32, doing the math, and converting back, we pay a tiny compute overhead in exchange for rock-solid stability.
+
+### 4. Compilation Units and Headers
+You'll notice we declare `ops.h` and implement in `ops.cc`. In industry, keeping your `#include` directives minimal in the `.h` file is critical. Every time a `.h` file is included in another file, the C++ compiler essentially copy-pastes its contents. If you put heavy `#include <vector>` or `#include "engine.h"` in your header, any file that includes your header also compiles that heavy code. This causes compile times to explode (scaling to hours on large projects).
+
+**C++ Best Practice:** Always put your heavy `#includes` in the `.cc` implementation file, and use "forward declarations" (e.g., `class Tensor;`) in your header file whenever possible.

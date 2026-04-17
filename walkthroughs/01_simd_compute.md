@@ -162,3 +162,24 @@ Tensor abs(const Tensor& a) {
 
 ### Step 4: Add a Test!
 In `engine/ops/ops_test.cc`, write a test validating your Op against a known baseline.
+
+## Modern C++ Industry Paradigms
+
+Coming from a university C++ background, you might find some of the code patterns over-engineered or confusing. Here is the industry reasoning behind the Thread Pool and Compute architecture.
+
+### 1. Lambdas and `std::function` vs. Function Pointers
+In university, you might pass work to a thread using a function pointer (`void (*func)(int)`). In industry C++, we use **Lambdas** and `std::function`.
+In SIMD compute, our Thread Pool uses the signature:
+`void ParallelFor(int64_t count, std::function<void(int64_t, int64_t)> func);`
+
+This allows us to pass "closures" (functions that capture their surrounding state) directly into the thread without managing void pointers:
+```cpp
+// We "capture" pointers A, B, and C using [&] so the thread knows what to compute.
+pool.ParallelFor(M, [&](int64_t start, int64_t end) {
+    SimdGemm(A + start*K, B, C + start*N, end-start, N, K);
+});
+```
+
+### 2. Header-Only Libraries and `#include` Order
+You are likely used to putting declarations in `.h` files and implementations in `.cpp` files. To achieve dynamic hardware dispatch, Google Highway requires a very specific paradigm where implementations are placed in `.cc` files, but those `.cc` files are `#include`'d inside macro-wrappers. 
+In industry high-performance C++, relying on the linker to resolve `.cpp` and `.h` pairs introduces function-call overhead. Advanced libraries use macros and header-only architectures so the compiler can aggressively **inline** everything down to raw CPU instructions.

@@ -161,6 +161,7 @@ Tensor LayerNorm::forward(const Tensor& x) const {
 }
 ```
 
+
 **4. Update Model Loader (`InferenceEngine::BuildModel`):**
 In `engine/engine.cc`, find the function `BuildModel()`. This function hooks the incoming `gguf_` parser into the C++ `GemmaModel` classes.
 ```cpp
@@ -170,3 +171,35 @@ ie::Tensor weight = gguf_.GetTensorData("blk." + std::to_string(i) + ".ffn_norm.
 ```
 
 **Tip:** If you see "Tensor not found" errors, it's because the strings in `GetTensorData()` must exactly match the internal dictionary names of the `.gguf` file. Use a tool like python's `gguf-dump` to see the exact keys in the model file.
+
+## Modern C++ Industry Paradigms
+
+When building massive neural networks, university-taught C++ with `new` and `delete` leads to catastrophic memory leaks. Industry-standard C++ addresses this natively.
+
+### 1. Object Ownership & `std::unique_ptr`
+In the Engine architecture, the `GemmaModel` is instantiated inside `InferenceEngine::BuildModel()` using a factory pattern. We never declare `GemmaModel* model_ = new GemmaModel();`. 
+Instead, we use `std::unique_ptr<GemmaModel>`:
+```cpp
+// engine.cc
+model_ = std::make_unique<GemmaModel>(config, ...);
+```
+**Why?** `std::unique_ptr` guarantees that exactly one entity "owns" the model. When the `InferenceEngine` object goes out of scope (e.g., the program exits), the memory is automatically freed. It is mathematically impossible to memory-leak a unique pointer.
+
+### 2. Move Semantics (`std::move`)
+Loading a 1.2GB Embedding table in `GemmaModel` is dangerous. If you accidentally pass it by value, C++ will implicitly copy the 1.2GB matrix into the constructor.
+Industry C++ relies heavily on Move Semantics (C++11):
+```cpp
+// In GemmaModel constructor
+GemmaModel(GemmaConfig config, Tensor token_embedding, ...) 
+    : token_embedding_(std::move(token_embedding)) {}
+```
+`std::move` strips the memory ownership from the argument and transfers it perfectly to the class variable. The original parameter is left empty. This costs `O(1)` time—literally just copying a memory address, shifting ownership.
+
+### 3. Const-Correctness
+You will observe that all Neural Network layers have `.forward()` methods defined like this:
+```cpp
+Tensor TransformerBlock::forward(const Tensor& x, ...) const { ... }
+```
+The first `const` means "I promise not to accidentally modify the input Tensor variable memory."
+The second `const` at the end of the method signature means "I promise this method will not modify any internal state (weights) of the `TransformerBlock` class."
+In an ML Inference engine, `forward` passes are strictly Read-Only on the weights. Enforcing `const` prevents rogue code from accidentally tweaking weights during decode.

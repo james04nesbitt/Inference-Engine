@@ -212,12 +212,37 @@ void DequantizeQ4_K(const void* src, float* dst, int64_t num_elements) {
 }
 ```
 
-### Step 4: Hook it up to the loader
-Inside `ParseTensorData()` in the same file:
+### Step 3: Branch your loader in `LoadTensor`
+In `engine/gguf/gguf_loader.cc` inside `LoadTensor`:
 ```cpp
-if (type == 12) { // GGUF type ID for Q4_K
-    DequantizeQ4_K(raw_data, t.data<float>(), num_elements);
-    return t; // Successfully returned an FP32 contiguous representation
+if (info->type == GGMLType::kQ8_0) {
+    DequantizeQ8_0(src, out, numel);
+} else if (info->type == GGMLType::kQ4_K) { // Add your new logic
+    DequantizeQ4_K(src, out, numel);
 }
 ```
-*Note:* Since we dequantize at load time, you don't need to write new Matrix Math operations! The existing `ops::matmul` will just process the resultant FP32 tensor normally.
+
+## Modern C++ Industry Paradigms
+
+Quantization requires converting data types in memory via raw pointer manipulation. This bypasses the typical C++ type safety nets.
+
+### 1. Pointer Arithmetic over Indexing
+In `DequantizeQ8_0`, you see code like this:
+```cpp
+const uint8_t *block = src + b * BLOCK_BYTES;
+```
+Instead of allocating a multi-dimensional array or referencing `src[b][i]`, we treat memory as a flat 1-dimensional array of bytes and step through it linearly (`src + offset`). This is fundamental to C++ memory engineering: pointers are just integer memory addresses. Adding to a `uint8_t*` pointer advances the memory address by exactly 1 byte.
+
+### 2. The Danger of C-Style Casts (`reinterpret_cast`)
+You will see heavy use of `reinterpret_cast` in the loader:
+```cpp
+const int8_t *quants = reinterpret_cast<const int8_t *>(block + 2);
+```
+In university assignments, you might write `(int8_t*)(block + 2)`. This is a "C-style cast", and it is banned in modern C++ codebases. C-style casts will forcefully compile even if the type conversion makes zero sense, causing silent memory corruption at runtime.
+- `static_cast<float>(int_var)`: Used for safe, mathematically valid conversions (like int to float, checking bit-loss at compile time).
+- `reinterpret_cast<const int8_t*>(byte_ptr)`: We use this when we want to tell the C++ compiler: "I know these are raw 8-bit unsigned bytes, but starting at this EXACT memory address, I want you to treat the next 32 bytes as signed 8-bit integers." It is explicit and dangerous, signaling to code reviewers exactly where type safety is being discarded.
+
+### 3. Avoiding `std::vector` Zero-Initialization Overhead
+When decoding block arrays, we need temporary memory buffers.
+If you declare `std::vector<uint8_t> buffer(1000);`, the C++ standard requires the vector to painstakingly write a `0` to all 1000 bytes sequentially before letting you use it. 
+In a quantization decode loop that runs millions of times per second, writing `0` to memory that you are immediately going to overwrite with float data is a massive latency penalty. This is why you see `std::shared_ptr<uint8_t[]>(new uint8_t[out_bytes])` and raw C++ arrays used in low-level decoders, as they allocate memory instantly without zero-initialization overhead.

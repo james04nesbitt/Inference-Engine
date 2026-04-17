@@ -208,3 +208,30 @@ Tensor debug_attention(Tensor Q, Tensor K, Tensor V) {
 }
 ```
 Swap out the `flash_attention` call in `engine/model/layers.cc` for `debug_attention`, recompile `bazel run //engine:inference`, and you can inspect the attention maps.
+
+## Modern C++ Industry Paradigms
+
+Handling thousands of MB of RAM per second requires avoiding standard C++ heap assumptions. The KV Cache is a masterclass in modern custom memory allocation.
+
+### 1. Object Pooling vs. `new`/`delete`
+In a standard C++ university assignment, you might dynamically allocate a block every time a user types a new word:
+```cpp
+// BAD: Fragments RAM, causes OS overhead
+Block* new_block = new Block(); 
+```
+In an inference engine, calling `new` or `malloc` dynamically during token generation causes unacceptable latency spikes (and eventually Out of Memory Exceptions due to RAM fragmentation limit). 
+Instead, we use a **Memory Pool**. The `KVCacheManager` constructor allocates the *entire* maximum server memory pool upfront when the engine starts.
+```cpp
+// Pre-allocate the entire KV memory once on startup
+std::vector<uint8_t> huge_memory_pool_;
+huge_memory_pool_.resize(max_blocks * bytes_per_block);
+```
+During runtime, we simply hand out "pointers" into this existing block array via the `free_blocks_` queue. This guarantees `O(1)` allocations with zero OS overhead.
+
+### 2. Physical vs. Virtual Mapping (Paged Attention)
+Traditional C++ `std::vector<float>` requires *physically contiguous RAM*. If you need 100MB for a sequence, C++ asks the OS for a single unbroken 100MB chunk. If the OS can't find it, it throws `std::bad_alloc`, even if you have 200MB of fragmented free memory.
+
+Paged Attention mimics Virtual Memory. The physical `Tensor` memory blocks are scattered chaotically across RAM, but our `block_table[sequence_id]` acts like a Page Table, allowing our attention kernel to perform logical contiguous iterating without requiring physically contiguous RAM. 
+
+### 3. RAII and Safe Handles
+We do not expose raw pointers to the user sequence loop. When a sequence requests memory, we don't give it `uint8_t* ptr`. We give it `SequenceId`. The manager handles the cleanup. When `batch_scheduler` finishes a sequence, it simply calls `cache_manager.FreeSequence(id)`. This prevents dangling pointers or double frees.

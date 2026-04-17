@@ -131,8 +131,30 @@ pending_requests_.push(req);
 ```
 
 ### Step 2: Modifying `Step()` Execution
-Currently, `Step()` iterates over all `active_sequences_`. If you want to implement **Preemption** (pausing a sequence if the batch gets too large to maintain a latency SLA):
-1. Inside `Step()`, track `current_tpot_latency`.
-2. If it exceeds your SLA (e.g., 50ms), pop the longest sequence out of `active_sequences_`.
-3. Put it back into a `paused_requests_` queue.
-4. *Crucial:* You do NOT need to free its KV cache (unless you are out of memory). Just leave its `seq_id` allocated. When the queue clears, put it back into `active_sequences_` and it picks up exactly where it left off, context fully intact!
+1. Implement a sorting logic in the `Step()` function based on some `priority` variable.
+2. If `active_sequences_` is full, allow a high-priority request to `Preempt(id)` a low-priority request.
+3. Preempting frees the low-priority blocks and moves that sequence back into `waiting_requests_`.
+
+## Modern C++ Industry Paradigms
+
+Scheduling systems in university C++ often use basic `while(true)` loops parsing inputs natively. Industry scaling relies on non-blocking and callback architectures.
+
+### 1. The `struct` vs `class` Debate in State Management
+You will notice the codebase declares:
+```cpp
+struct Sequence {
+  int64_t id;
+  // ...
+};
+```
+In modern C++, `struct` and `class` are mathematically identical (except for default `public` vs `private` visibility). Industry convention dictates that `struct` is used strictly for **Plain Old Data (POD)**. Memory that holds state (like sequences in a queue) should be a `struct` without complex methods, destructors, or private wrappers. `class` is used for **Behavioral Objects** (like `BatchScheduler`) that enforce invariants and manage private resources.
+
+### 2. Event-Driven Callbacks over Polling
+Instead of returning a giant array of outputs to the console once generation is done, the scheduler accepts a `std::function` callback:
+```cpp
+void BatchScheduler::AddRequest(..., std::function<void(const std::string&)> callback) {
+    req.on_token_generated = callback;
+}
+```
+When a token is decoded deep inside the engine, the engine fires `on_token_generated(text)`.
+**Why?** This enables Asynchronous IO. A web-server (like `gRPC` or `REST`) invoking this engine doesn't have to poll the C++ engine to see if words are ready. The Engine triggers the network socket directly whenever a word is generated, enabling real-time streaming directly from hardware execution to a webpage.
