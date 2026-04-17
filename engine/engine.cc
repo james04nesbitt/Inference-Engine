@@ -224,6 +224,8 @@ bool InferenceEngine::BuildModel() {
             << "\n  vocab_size:   " << config_.vocab_size << std::endl;
 
   Tensor token_embedding = gguf_.LoadTensor("token_embd.weight");
+  // Pre-transpose embedding for logit projection: [vocab, embed] → [embed, vocab]
+  Tensor embed_t = gguf_.LoadTensorTransposed("token_embd.weight");
 
   std::vector<TransformerBlock> layers;
   layers.reserve(config_.num_layers);
@@ -231,23 +233,25 @@ bool InferenceEngine::BuildModel() {
   for (int32_t i = 0; i < config_.num_layers; ++i) {
     std::string prefix = "blk." + std::to_string(i) + ".";
 
-    Tensor wq = gguf_.LoadTensor(prefix + "attn_q.weight");
-    Tensor wk = gguf_.LoadTensor(prefix + "attn_k.weight");
-    Tensor wv = gguf_.LoadTensor(prefix + "attn_v.weight");
-    Tensor wo = gguf_.LoadTensor(prefix + "attn_output.weight");
+    // Load weight matrices pre-transposed (fused load + F16→F32 + transpose).
+    // This avoids 8 intermediate allocations per layer.
+    Tensor wq_t = gguf_.LoadTensorTransposed(prefix + "attn_q.weight");
+    Tensor wk_t = gguf_.LoadTensorTransposed(prefix + "attn_k.weight");
+    Tensor wv_t = gguf_.LoadTensorTransposed(prefix + "attn_v.weight");
+    Tensor wo_t = gguf_.LoadTensorTransposed(prefix + "attn_output.weight");
 
-    Tensor w_gate = gguf_.LoadTensor(prefix + "ffn_gate.weight");
-    Tensor w_up = gguf_.LoadTensor(prefix + "ffn_up.weight");
-    Tensor w_down = gguf_.LoadTensor(prefix + "ffn_down.weight");
+    Tensor gate_t = gguf_.LoadTensorTransposed(prefix + "ffn_gate.weight");
+    Tensor up_t = gguf_.LoadTensorTransposed(prefix + "ffn_up.weight");
+    Tensor down_t = gguf_.LoadTensorTransposed(prefix + "ffn_down.weight");
 
     Tensor attn_norm_w = gguf_.LoadTensor(prefix + "attn_norm.weight");
     Tensor ffn_norm_w = gguf_.LoadTensor(prefix + "ffn_norm.weight");
 
     RMSNorm attn_norm(std::move(attn_norm_w), config_.rms_norm_eps);
-    Attention attn(config_, i, std::move(wq), std::move(wk), std::move(wv),
-                   std::move(wo));
+    Attention attn(config_, i, std::move(wq_t), std::move(wk_t),
+                   std::move(wv_t), std::move(wo_t));
     RMSNorm ffn_norm(std::move(ffn_norm_w), config_.rms_norm_eps);
-    FeedForward ffn(std::move(w_gate), std::move(w_up), std::move(w_down));
+    FeedForward ffn(std::move(gate_t), std::move(up_t), std::move(down_t));
 
     layers.emplace_back(config_, i, std::move(attn_norm), std::move(attn),
                         std::move(ffn_norm), std::move(ffn));
@@ -258,9 +262,10 @@ bool InferenceEngine::BuildModel() {
   Tensor final_norm_w = gguf_.LoadTensor("output_norm.weight");
   RMSNorm final_norm(std::move(final_norm_w), config_.rms_norm_eps);
 
-  model_ =
-      std::make_unique<GemmaModel>(config_, std::move(token_embedding),
-                                   std::move(layers), std::move(final_norm));
+  model_ = std::make_unique<GemmaModel>(config_, std::move(token_embedding),
+                                        std::move(layers),
+                                        std::move(final_norm),
+                                        std::move(embed_t));
 
   // Create the paged KV cache.
   int32_t blocks_per_seq =

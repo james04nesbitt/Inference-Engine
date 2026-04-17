@@ -51,11 +51,12 @@ TEST(RMSNorm, WithWeightScaling) {
 // ============================================================================
 
 TEST(FeedForward, SmallSwiGLU) {
-  Tensor w_gate = Tensor::ones({3, 2});
-  Tensor w_up = Tensor::ones({3, 2});
-  Tensor w_down = Tensor::ones({2, 3});
+  // Constructors now expect pre-transposed weights: [out, in] → [in, out]
+  Tensor gate_t = Tensor::ones({3, 2}).transpose(0, 1).contiguous();
+  Tensor up_t = Tensor::ones({3, 2}).transpose(0, 1).contiguous();
+  Tensor down_t = Tensor::ones({2, 3}).transpose(0, 1).contiguous();
 
-  FeedForward ffn(w_gate, w_up, w_down);
+  FeedForward ffn(gate_t, up_t, down_t);
 
   Tensor x = Tensor::ones({1, 2});
 
@@ -84,18 +85,19 @@ TEST(TransformerBlock, SmallBlock) {
 
   Tensor attn_norm_w = Tensor::ones({4});
   Tensor ffn_norm_w = Tensor::ones({4});
-  Tensor wq = Tensor::full({4, 4}, 0.1f);
-  Tensor wk = Tensor::full({4, 4}, 0.1f);
-  Tensor wv = Tensor::full({4, 4}, 0.1f);
-  Tensor wo = Tensor::full({4, 4}, 0.1f);
-  Tensor w_gate = Tensor::full({8, 4}, 0.1f);
-  Tensor w_up = Tensor::full({8, 4}, 0.1f);
-  Tensor w_down = Tensor::full({4, 8}, 0.1f);
+  // Pre-transpose weights: constructors now expect [in, out] layout.
+  Tensor wq_t = Tensor::full({4, 4}, 0.1f).transpose(0, 1).contiguous();
+  Tensor wk_t = Tensor::full({4, 4}, 0.1f).transpose(0, 1).contiguous();
+  Tensor wv_t = Tensor::full({4, 4}, 0.1f).transpose(0, 1).contiguous();
+  Tensor wo_t = Tensor::full({4, 4}, 0.1f).transpose(0, 1).contiguous();
+  Tensor gate_t = Tensor::full({8, 4}, 0.1f).transpose(0, 1).contiguous();
+  Tensor up_t = Tensor::full({8, 4}, 0.1f).transpose(0, 1).contiguous();
+  Tensor down_t = Tensor::full({4, 8}, 0.1f).transpose(0, 1).contiguous();
 
   RMSNorm attn_norm(attn_norm_w, config.rms_norm_eps);
-  Attention attn(config, /*layer_idx=*/0, wq, wk, wv, wo);
+  Attention attn(config, /*layer_idx=*/0, wq_t, wk_t, wv_t, wo_t);
   RMSNorm ffn_norm(ffn_norm_w, config.rms_norm_eps);
-  FeedForward ffn(w_gate, w_up, w_down);
+  FeedForward ffn(gate_t, up_t, down_t);
 
   TransformerBlock block(config, /*layer_idx=*/0, std::move(attn_norm),
                          std::move(attn), std::move(ffn_norm), std::move(ffn));

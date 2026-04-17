@@ -7,6 +7,15 @@
 #include <variant>
 #include <vector>
 
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
+
 #include "engine/tensor/tensor.h"
 
 namespace ie {
@@ -101,23 +110,26 @@ struct GGUFTensorInfo {
 // ============================================================================
 // GGUFFile — Reads and provides access to a GGUF model file.
 //
-// YOUR THIRD MAJOR LEARNING OBJECTIVE:
-//   Binary file I/O, memory mapping, struct packing.
-//
-// Implementation strategy:
-//   Phase 1: Read header + metadata with ifstream (this is started for you)
-//   Phase 2: Read tensor info entries
-//   Phase 3: Load tensors into your Tensor class
-//   Phase 4: Memory-map tensors for zero-copy loading (advanced)
+// Uses memory-mapped I/O for zero-copy tensor loading. The file is mapped
+// once in Open() and all tensor reads go through the mapped memory region,
+// eliminating per-tensor file open/seek/read overhead.
 // ============================================================================
 class GGUFFile {
 public:
   GGUFFile() = default;
-  ~GGUFFile() = default;
+  ~GGUFFile();
+
+  // Non-copyable due to mmap resources.
+  GGUFFile(const GGUFFile &) = delete;
+  GGUFFile &operator=(const GGUFFile &) = delete;
 
   // Opens and parses the GGUF file header and metadata.
+  // Memory-maps the entire file for fast tensor loading.
   // Returns false on failure.
   bool Open(const std::string &path);
+
+  // Closes the memory-mapped file and releases resources.
+  void Close();
 
   // --- Accessors ---
   const GGUFHeader &header() const { return header_; }
@@ -139,8 +151,16 @@ public:
   const GGUFTensorInfo *GetTensorInfo(const std::string &name) const;
 
   // Load a tensor's data into a Tensor object.
-  // TODO: Implement this — it's where binary parsing meets your Tensor class
+  // Reads directly from memory-mapped region — no file I/O per call.
   Tensor LoadTensor(const std::string &name) const;
+
+  // Load a 2D tensor and transpose it in a single fused pass.
+  // Avoids the intermediate allocation from separate load + transpose +
+  // contiguous. For F16 tensors, also fuses the F16→F32 conversion.
+  //
+  // Input shape in GGUF: [rows, cols]
+  // Output Tensor shape:  [cols, rows] (transposed, contiguous)
+  Tensor LoadTensorTransposed(const std::string &name) const;
 
   // List all tensor names.
   std::vector<std::string> TensorNames() const;
@@ -154,12 +174,24 @@ private:
   std::map<std::string, GGUFTensorInfo> tensors_;
   std::string file_path_;
   uint64_t tensor_data_offset_ = 0; // Byte offset where tensor data starts
+  uint64_t file_size_ = 0;
+
+  // Memory-mapped file state
+  const uint8_t *mapped_data_ = nullptr;
+#ifdef _WIN32
+  HANDLE file_handle_ = INVALID_HANDLE_VALUE;
+  HANDLE mapping_handle_ = nullptr;
+#else
+  int fd_ = -1;
+#endif
 
   // --- Internal parsing helpers ---
-  // TODO: Implement these
   bool ReadHeader(std::ifstream &file);
   bool ReadMetadata(std::ifstream &file);
   bool ReadTensorInfos(std::ifstream &file);
+
+  // Memory-map the file. Called from Open() after parsing headers.
+  bool MapFile();
 
   // Low-level read helpers
   std::string ReadString(std::ifstream &file);

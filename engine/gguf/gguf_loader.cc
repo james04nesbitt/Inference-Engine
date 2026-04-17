@@ -161,6 +161,111 @@ static void DequantizeQ4_0(const uint8_t *src, float *dst, int64_t numel) {
 }
 
 // ============================================================================
+// GGUFFile destructor
+// ============================================================================
+
+GGUFFile::~GGUFFile() { Close(); }
+
+void GGUFFile::Close() {
+  if (mapped_data_) {
+#ifdef _WIN32
+    UnmapViewOfFile(mapped_data_);
+    mapped_data_ = nullptr;
+    if (mapping_handle_) {
+      CloseHandle(mapping_handle_);
+      mapping_handle_ = nullptr;
+    }
+    if (file_handle_ != INVALID_HANDLE_VALUE) {
+      CloseHandle(file_handle_);
+      file_handle_ = INVALID_HANDLE_VALUE;
+    }
+#else
+    munmap(const_cast<uint8_t *>(mapped_data_),
+           static_cast<size_t>(file_size_));
+    mapped_data_ = nullptr;
+    if (fd_ >= 0) {
+      close(fd_);
+      fd_ = -1;
+    }
+#endif
+  }
+  file_size_ = 0;
+}
+
+// ============================================================================
+// MapFile — memory-map the entire GGUF file
+// ============================================================================
+
+bool GGUFFile::MapFile() {
+#ifdef _WIN32
+  file_handle_ = CreateFileA(file_path_.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                             nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
+                             nullptr);
+  if (file_handle_ == INVALID_HANDLE_VALUE) {
+    std::cerr << "MapFile: failed to open file: " << file_path_ << std::endl;
+    return false;
+  }
+
+  LARGE_INTEGER size;
+  if (!GetFileSizeEx(file_handle_, &size)) {
+    std::cerr << "MapFile: failed to get file size" << std::endl;
+    CloseHandle(file_handle_);
+    file_handle_ = INVALID_HANDLE_VALUE;
+    return false;
+  }
+  file_size_ = static_cast<uint64_t>(size.QuadPart);
+
+  mapping_handle_ =
+      CreateFileMappingA(file_handle_, nullptr, PAGE_READONLY, 0, 0, nullptr);
+  if (!mapping_handle_) {
+    std::cerr << "MapFile: failed to create file mapping" << std::endl;
+    CloseHandle(file_handle_);
+    file_handle_ = INVALID_HANDLE_VALUE;
+    return false;
+  }
+
+  mapped_data_ = static_cast<const uint8_t *>(
+      MapViewOfFile(mapping_handle_, FILE_MAP_READ, 0, 0, 0));
+  if (!mapped_data_) {
+    std::cerr << "MapFile: failed to map view of file" << std::endl;
+    CloseHandle(mapping_handle_);
+    mapping_handle_ = nullptr;
+    CloseHandle(file_handle_);
+    file_handle_ = INVALID_HANDLE_VALUE;
+    return false;
+  }
+#else
+  fd_ = open(file_path_.c_str(), O_RDONLY);
+  if (fd_ < 0) {
+    std::cerr << "MapFile: failed to open file: " << file_path_ << std::endl;
+    return false;
+  }
+
+  struct stat st;
+  if (fstat(fd_, &st) != 0) {
+    std::cerr << "MapFile: failed to stat file" << std::endl;
+    close(fd_);
+    fd_ = -1;
+    return false;
+  }
+  file_size_ = static_cast<uint64_t>(st.st_size);
+
+  void *ptr =
+      mmap(nullptr, static_cast<size_t>(file_size_), PROT_READ, MAP_PRIVATE,
+           fd_, 0);
+  if (ptr == MAP_FAILED) {
+    std::cerr << "MapFile: mmap failed" << std::endl;
+    close(fd_);
+    fd_ = -1;
+    return false;
+  }
+  mapped_data_ = static_cast<const uint8_t *>(ptr);
+#endif
+
+  return true;
+}
+
+// ============================================================================
 // Open — top-level entry point
 // ============================================================================
 
@@ -196,6 +301,16 @@ bool GGUFFile::Open(const std::string &path) {
   }
   tensor_data_offset_ =
       (tensor_data_offset_ + alignment - 1) & ~(alignment - 1);
+
+  // Close the ifstream — we'll use mmap from here on.
+  file.close();
+
+  // Phase 4: Memory-map the file for fast tensor loading.
+  if (!MapFile()) {
+    std::cerr << "Warning: memory-map failed, falling back to ifstream"
+              << std::endl;
+    // mapped_data_ remains nullptr; LoadTensor will fall back to ifstream.
+  }
 
   return true;
 }
@@ -471,7 +586,7 @@ const GGUFTensorInfo *GGUFFile::GetTensorInfo(const std::string &name) const {
 }
 
 // ============================================================================
-// LoadTensor — read tensor data from file into a Tensor object
+// LoadTensor — read tensor data from memory-mapped region
 // ============================================================================
 
 Tensor GGUFFile::LoadTensor(const std::string &name) const {
@@ -489,25 +604,57 @@ Tensor GGUFFile::LoadTensor(const std::string &name) const {
     numel *= static_cast<int64_t>(d);
   }
 
-  // Open the file and seek to the tensor's data.
+  uint64_t data_pos = tensor_data_offset_ + info->offset;
+
+  // --- Memory-mapped path (fast) ---
+  if (mapped_data_) {
+    const uint8_t *src = mapped_data_ + data_pos;
+
+    // Block-quantized types: dequantize from mmap'd memory.
+    if (info->type == GGMLType::kQ8_0 || info->type == GGMLType::kQ4_0) {
+      size_t out_bytes = static_cast<size_t>(numel) * sizeof(float);
+      auto buf = std::shared_ptr<uint8_t[]>(new uint8_t[out_bytes]);
+      float *out = reinterpret_cast<float *>(buf.get());
+
+      if (info->type == GGMLType::kQ8_0) {
+        DequantizeQ8_0(src, out, numel);
+      } else {
+        DequantizeQ4_0(src, out, numel);
+      }
+
+      return Tensor::from_buffer(std::move(buf), std::move(shape),
+                                 DType::kFloat32);
+    }
+
+    // Non-quantized types: memcpy from mmap'd memory.
+    DType dtype = GGMLTypeToDType(info->type);
+    size_t elem_size =
+        (info->type == GGMLType::kF16) ? 2 : GGMLTypeSize(info->type);
+    size_t nbytes = static_cast<size_t>(numel) * elem_size;
+
+    auto buf = std::shared_ptr<uint8_t[]>(new uint8_t[nbytes]);
+    std::memcpy(buf.get(), src, nbytes);
+
+    return Tensor::from_buffer(std::move(buf), std::move(shape), dtype);
+  }
+
+  // --- Fallback: ifstream path (if mmap failed) ---
   std::ifstream file(file_path_, std::ios::binary);
   if (!file.is_open()) {
     throw std::runtime_error("LoadTensor: cannot open file: " + file_path_);
   }
-  uint64_t seek_pos = tensor_data_offset_ + info->offset;
-  file.seekg(static_cast<std::streamoff>(seek_pos));
+  file.seekg(static_cast<std::streamoff>(data_pos));
   if (file.fail()) {
     throw std::runtime_error("LoadTensor: seek failed for tensor: " + name);
   }
 
-  // --- Branch: block-quantized types require dequantization on load ---
+  // Block-quantized types require dequantization on load.
   if (info->type == GGMLType::kQ8_0 || info->type == GGMLType::kQ4_0) {
     int64_t block_elems = GGMLBlockElements(info->type);
     size_t block_bytes = GGMLBlockBytes(info->type);
     int64_t n_blocks = numel / block_elems;
     size_t raw_bytes = static_cast<size_t>(n_blocks) * block_bytes;
 
-    // Read raw quantized data.
     std::vector<uint8_t> raw(raw_bytes);
     file.read(reinterpret_cast<char *>(raw.data()),
               static_cast<std::streamsize>(raw_bytes));
@@ -515,7 +662,6 @@ Tensor GGUFFile::LoadTensor(const std::string &name) const {
       throw std::runtime_error("LoadTensor: read failed for tensor: " + name);
     }
 
-    // Allocate FP32 output and dequantize.
     size_t out_bytes = static_cast<size_t>(numel) * sizeof(float);
     auto buf = std::shared_ptr<uint8_t[]>(new uint8_t[out_bytes]);
     float *out = reinterpret_cast<float *>(buf.get());
@@ -530,7 +676,7 @@ Tensor GGUFFile::LoadTensor(const std::string &name) const {
                                DType::kFloat32);
   }
 
-  // --- Non-quantized types: direct load ---
+  // Non-quantized types: direct load.
   DType dtype = GGMLTypeToDType(info->type);
   size_t elem_size = GGMLTypeSize(info->type);
   size_t nbytes = static_cast<size_t>(numel) * elem_size;
@@ -543,6 +689,91 @@ Tensor GGUFFile::LoadTensor(const std::string &name) const {
   }
 
   return Tensor::from_buffer(std::move(buf), std::move(shape), dtype);
+}
+
+// ============================================================================
+// LoadTensorTransposed — fused load + transpose for 2D weight matrices
+//
+// Instead of: LoadTensor → transpose(0,1) → contiguous()  (2 allocations)
+// This does:  read from mmap → write directly in transposed layout (1 alloc)
+//
+// For F16 tensors, also fuses the F16→F32 conversion, so the result is
+// always an FP32 contiguous tensor in transposed layout.
+// ============================================================================
+
+Tensor GGUFFile::LoadTensorTransposed(const std::string &name) const {
+  const GGUFTensorInfo *info = GetTensorInfo(name);
+  if (!info) {
+    throw std::runtime_error("LoadTensorTransposed: tensor not found: " + name);
+  }
+
+  if (info->dimensions.size() != 2) {
+    throw std::runtime_error(
+        "LoadTensorTransposed: expected 2D tensor, got " +
+        std::to_string(info->dimensions.size()) + "D for: " + name);
+  }
+
+  int64_t rows = static_cast<int64_t>(info->dimensions[0]);
+  int64_t cols = static_cast<int64_t>(info->dimensions[1]);
+  int64_t numel = rows * cols;
+
+  // Output shape is transposed: [cols, rows]
+  std::vector<int64_t> out_shape = {cols, rows};
+  size_t out_bytes = static_cast<size_t>(numel) * sizeof(float);
+  auto buf = std::shared_ptr<uint8_t[]>(new uint8_t[out_bytes]);
+  float *out = reinterpret_cast<float *>(buf.get());
+
+  uint64_t data_pos = tensor_data_offset_ + info->offset;
+
+  if (mapped_data_) {
+    const uint8_t *src = mapped_data_ + data_pos;
+
+    if (info->type == GGMLType::kF16) {
+      // Fused F16→F32 conversion + transpose.
+      // Source layout: row-major [rows, cols] as FP16
+      // Output layout: row-major [cols, rows] as FP32
+      const uint16_t *fp16_src = reinterpret_cast<const uint16_t *>(src);
+      for (int64_t r = 0; r < rows; ++r) {
+        for (int64_t c = 0; c < cols; ++c) {
+          out[c * rows + r] = Fp16ToFp32(fp16_src[r * cols + c]);
+        }
+      }
+    } else if (info->type == GGMLType::kF32) {
+      // Transpose F32 data.
+      const float *f32_src = reinterpret_cast<const float *>(src);
+      for (int64_t r = 0; r < rows; ++r) {
+        for (int64_t c = 0; c < cols; ++c) {
+          out[c * rows + r] = f32_src[r * cols + c];
+        }
+      }
+    } else if (info->type == GGMLType::kQ8_0 ||
+               info->type == GGMLType::kQ4_0) {
+      // Dequantize into a temporary buffer, then transpose.
+      // (Quantized data is block-structured so we can't easily fuse.)
+      std::vector<float> tmp(numel);
+      if (info->type == GGMLType::kQ8_0) {
+        DequantizeQ8_0(src, tmp.data(), numel);
+      } else {
+        DequantizeQ4_0(src, tmp.data(), numel);
+      }
+      for (int64_t r = 0; r < rows; ++r) {
+        for (int64_t c = 0; c < cols; ++c) {
+          out[c * rows + r] = tmp[r * cols + c];
+        }
+      }
+    } else {
+      throw std::runtime_error(
+          "LoadTensorTransposed: unsupported type for: " + name);
+    }
+  } else {
+    // Fallback: load normally then transpose.
+    Tensor t = LoadTensor(name);
+    Tensor transposed = t.transpose(0, 1).contiguous();
+    return transposed;
+  }
+
+  return Tensor::from_buffer(std::move(buf), std::move(out_shape),
+                             DType::kFloat32);
 }
 
 // ============================================================================

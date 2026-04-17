@@ -28,13 +28,14 @@ private:
 // --- Multi-Head Attention with Grouped Query Attention (GQA) ---
 class Attention {
 public:
-  Attention(const GemmaConfig &config, int32_t layer_idx, Tensor wq, Tensor wk,
-            Tensor wv, Tensor wo)
-      : config_(config), layer_idx_(layer_idx),
-        wq_t_(wq.transpose(0, 1).contiguous()),
-        wk_t_(wk.transpose(0, 1).contiguous()),
-        wv_t_(wv.transpose(0, 1).contiguous()),
-        wo_t_(wo.transpose(0, 1).contiguous()) {}
+  // Constructor accepting pre-transposed weight matrices.
+  // Weights should already be in [out_features, in_features] → [in, out]
+  // transposed layout for efficient matmul.
+  Attention(const GemmaConfig &config, int32_t layer_idx, Tensor wq_t,
+            Tensor wk_t, Tensor wv_t, Tensor wo_t)
+      : config_(config), layer_idx_(layer_idx), wq_t_(std::move(wq_t)),
+        wk_t_(std::move(wk_t)), wv_t_(std::move(wv_t)),
+        wo_t_(std::move(wo_t)) {}
 
   Tensor forward(const Tensor &x, int32_t start_pos, KVCacheManager &kv_cache,
                  int64_t seq_id) const;
@@ -48,10 +49,10 @@ private:
 // --- Feed-Forward Network (SwiGLU variant) ---
 class FeedForward {
 public:
-  FeedForward(Tensor w_gate, Tensor w_up, Tensor w_down)
-      : gate_t_(w_gate.transpose(0, 1).contiguous()),
-        up_t_(w_up.transpose(0, 1).contiguous()),
-        down_t_(w_down.transpose(0, 1).contiguous()) {}
+  // Constructor accepting pre-transposed weight matrices.
+  FeedForward(Tensor gate_t, Tensor up_t, Tensor down_t)
+      : gate_t_(std::move(gate_t)), up_t_(std::move(up_t)),
+        down_t_(std::move(down_t)) {}
 
   Tensor forward(const Tensor &x) const;
 
@@ -85,12 +86,16 @@ private:
 // KV cache is externally owned — the caller (engine/scheduler) manages it.
 class GemmaModel {
 public:
+  // token_embedding: the raw embedding table [vocab_size, embed_dim]
+  // embed_t: pre-transposed embedding table [embed_dim, vocab_size] for logit
+  // projection
   GemmaModel(GemmaConfig config, Tensor token_embedding,
-             std::vector<TransformerBlock> layers, RMSNorm final_norm)
+             std::vector<TransformerBlock> layers, RMSNorm final_norm,
+             Tensor embed_t)
       : config_(std::move(config)),
         token_embedding_(std::move(token_embedding)),
         layers_(std::move(layers)), final_norm_(std::move(final_norm)),
-        embed_t_(token_embedding_.transpose(0, 1).contiguous()) {}
+        embed_t_(std::move(embed_t)) {}
 
   // Forward pass with externally-provided KV cache.
   Tensor forward(const Tensor &tokens, int32_t start_pos,

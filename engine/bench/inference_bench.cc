@@ -46,24 +46,24 @@ static ie::GemmaModel BuildSyntheticModel(const ie::GemmaConfig &config) {
   // Build transformer blocks.
   std::vector<ie::TransformerBlock> layers;
   for (int32_t i = 0; i < config.num_layers; ++i) {
-    // Attention weights.
-    ie::Tensor wq =
-        RandomTensor({config.num_heads * config.head_dim, config.embed_dim});
-    ie::Tensor wk =
-        RandomTensor({config.num_kv_heads * config.head_dim, config.embed_dim});
-    ie::Tensor wv =
-        RandomTensor({config.num_kv_heads * config.head_dim, config.embed_dim});
-    ie::Tensor wo =
+    // Attention weights — pre-transposed for the new API.
+    ie::Tensor wq_t =
         RandomTensor({config.embed_dim, config.num_heads * config.head_dim});
+    ie::Tensor wk_t =
+        RandomTensor({config.embed_dim, config.num_kv_heads * config.head_dim});
+    ie::Tensor wv_t =
+        RandomTensor({config.embed_dim, config.num_kv_heads * config.head_dim});
+    ie::Tensor wo_t =
+        RandomTensor({config.num_heads * config.head_dim, config.embed_dim});
 
-    ie::Attention attn(config, i, std::move(wq), std::move(wk), std::move(wv),
-                       std::move(wo));
+    ie::Attention attn(config, i, std::move(wq_t), std::move(wk_t),
+                       std::move(wv_t), std::move(wo_t));
 
-    // FFN weights (SwiGLU).
-    ie::Tensor w_gate = RandomTensor({config.hidden_dim, config.embed_dim});
-    ie::Tensor w_up = RandomTensor({config.hidden_dim, config.embed_dim});
-    ie::Tensor w_down = RandomTensor({config.embed_dim, config.hidden_dim});
-    ie::FeedForward ffn(std::move(w_gate), std::move(w_up), std::move(w_down));
+    // FFN weights (SwiGLU) — pre-transposed.
+    ie::Tensor gate_t = RandomTensor({config.embed_dim, config.hidden_dim});
+    ie::Tensor up_t = RandomTensor({config.embed_dim, config.hidden_dim});
+    ie::Tensor down_t = RandomTensor({config.hidden_dim, config.embed_dim});
+    ie::FeedForward ffn(std::move(gate_t), std::move(up_t), std::move(down_t));
 
     // Layer norms.
     ie::Tensor attn_norm_w = ie::Tensor::ones({config.embed_dim});
@@ -79,8 +79,11 @@ static ie::GemmaModel BuildSyntheticModel(const ie::GemmaConfig &config) {
   ie::Tensor final_norm_w = ie::Tensor::ones({config.embed_dim});
   ie::RMSNorm final_norm(std::move(final_norm_w), config.rms_norm_eps);
 
+  // Pre-transposed embedding for logit projection.
+  ie::Tensor embed_t = RandomTensor({config.embed_dim, bench_vocab});
+
   return ie::GemmaModel(config, std::move(token_embedding), std::move(layers),
-                        std::move(final_norm));
+                        std::move(final_norm), std::move(embed_t));
 }
 
 // Simulate greedy sampling: argmax over logits.
