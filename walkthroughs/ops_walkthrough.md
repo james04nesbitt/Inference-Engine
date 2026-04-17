@@ -260,3 +260,63 @@ tokens → embedding() → x
               logits = matmul(x, W_embed^T)
               probs = softmax(logits)
 ```
+
+## Developer Guide: How to Add a New Op
+
+If you need to implement a new mathematical operation (e.g., `GELU` or `Sigmoid`), follow this exact recipe:
+
+### 1. Declare in `ops.h`
+Add the function signature. It should almost always take `const Tensor&` and return a new `Tensor`.
+```cpp
+// In engine/ops/ops.h
+Tensor sigmoid(const Tensor& a);
+```
+
+### 2. Boilerplate Setup in `ops.cc`
+Every operation must start by ensuring the data is contiguous (laid out linearly in memory) and allocating the output tensor.
+```cpp
+Tensor sigmoid(const Tensor& a) {
+    // 1. Force contiguous layout
+    Tensor a_c = a.contiguous();
+    
+    // 2. Remember original dtype, upcast to Float32 for math
+    DType out_dtype = a_c.dtype();
+    Tensor a_f = a_c.to(DType::kFloat32);
+    
+    // 3. Allocate output tensor
+    Tensor out(a_f.shape(), DType::kFloat32);
+    
+    // 4. Get raw float pointers
+    const float* in_ptr = a_f.data<float>();
+    float* out_ptr = out.data<float>();
+    int64_t n = a_f.numel();
+    
+    // 5. The Math Loop  (or call to simd_kernels.h!)
+    for (int64_t i = 0; i < n; ++i) {
+        out_ptr[i] = 1.0f / (1.0f + std::exp(-in_ptr[i]));
+    }
+    
+    // 6. Return, downcasting back to original format if necessary
+    return out.to(out_dtype);
+}
+```
+
+### 3. Add to `ops_test.cc`
+You MUST test your operation against known values. Add a test case using `EXPECT_NEAR` for floating point comparisons:
+```cpp
+TEST(OpsTest, Sigmoid) {
+    Tensor a = Tensor::from_vector({0.0f, 2.0f, -2.0f});
+    Tensor out = ops::sigmoid(a);
+    
+    EXPECT_NEAR(out.data<float>()[0], 0.5f, 1e-4);
+    EXPECT_NEAR(out.data<float>()[1], 0.88079f, 1e-4);
+    EXPECT_NEAR(out.data<float>()[2], 0.11920f, 1e-4);
+}
+```
+
+### Why we upcast everything to FP32 inside Ops
+You will notice the pattern: `a.to(DType::kFloat32)`. 
+While the weights might be INT8 (`Q8_0`) or FP16 coming off the disk or out of the KV Cache, doing intermediary math (like `exp()` in softmax or the Sigmoid function) in low precision causes catastrophic numerical instability. 
+1. `std::exp(-x)` can easily underflow FP16.
+2. Accumulating large dot-products in FP16 will overflow the maximum value of `65504`.
+By upcasting to FP32, doing the math, and converting back, we pay a tiny compute overhead in exchange for rock-solid stability.

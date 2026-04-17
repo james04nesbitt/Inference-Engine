@@ -161,3 +161,63 @@ Block of 32 values:
 | Outlier handling | Mixed-precision (INT8 + FP32) | Preserves critical channels, ~50% savings |
 | GGUF quant types | Dequant at load time | Simpler inference path, reuses FP32 kernels |
 | QuantizedMatmul | On-the-fly dequant | Preserves memory savings during compute |
+
+## Cost & Infrastructure Perspective
+
+### Memory-Bound Economics
+As an ML Infra Engineer, the single most important math equation you will use is calculating your inference engine's "Roofline". 
+During Decode, the time taken is:
+`Decode Time = Max(FLOPs / Compute_Bandwidth, Bytes / Memory_Bandwidth)`
+
+For an FP32 1B Model (~4.4 GB) on a processor with 50 GB/s bandwidth:
+`Decode Time = 4.4 GB / 50 GB/s = 88 ms per token (11.3 Tokens/sec)`
+If you quantize to INT8 (1.1 GB):
+`Decode Time = 1.1 GB / 50 GB/s = 22 ms per token (45.4 Tokens/sec)`
+
+You get a 4x latency reduction literally for free because the execution was starving for bytes. 
+
+### W8A16 vs W8A8 True Limits
+- **W8A16** (Weight 8-bit, Activation FP16/FP32): This is what we implement in `QuantizedMatmul`. Weights are loaded as INT8 (lowering memory bandwidth demands), but the dot-product math is done in FP32. This is extremely effective for the Decode phase.
+- **W8A8** (Both Weights and Activations 8-bit): Used in heavily Compute-bound scenarios (like the Prefill phase of massive prompts). Since our primary bottleneck for local execution is memory (Decode phase), W8A16 gets us 95% of the performance gains without the harsh accuracy penalty and complex activation scaling factors of W8A8.
+
+## Developer Guide: Adding a New GGUF Quantization Format
+
+Suppose you want to support downloading a `Q4_K` model from Hugging Face instead of the basic `Q8_0` format.
+
+### Step 1: Understand the Block Structure
+GGUF `Q4_K` (K-quants) uses sub-blocks. 256 values are grouped together, with a global scale, and then further subdivided into smaller blocks with their own local scales/mins.
+
+### Step 2: Add the Enum
+In `engine/gguf/gguf_loader.h`, add the struct for the GGUF spec:
+```cpp
+#pragma pack(push, 1)
+struct BlockQ4_K { // Exact specs from llama.cpp
+    uint8_t scales[12];
+    uint8_t qs[128];
+    // etc... based on K-quant specification
+};
+#pragma pack(pop)
+```
+
+### Step 3: Implement the Dequantize Kernel
+In `engine/gguf/gguf_loader.cc`, write the kernel to turn these packed 4-bit values back into FP32 during load time:
+```cpp
+void DequantizeQ4_K(const void* src, float* dst, int64_t num_elements) {
+    const BlockQ4_K* blocks = static_cast<const BlockQ4_K*>(src);
+    int num_blocks = num_elements / 256; // Q4_K block size
+    for (int i = 0; i < num_blocks; ++i) {
+        // ... unpack the 4-bit values and multiply by the two-level scales... 
+        // dst[i * 256 + j] = ...
+    }
+}
+```
+
+### Step 4: Hook it up to the loader
+Inside `ParseTensorData()` in the same file:
+```cpp
+if (type == 12) { // GGUF type ID for Q4_K
+    DequantizeQ4_K(raw_data, t.data<float>(), num_elements);
+    return t; // Successfully returned an FP32 contiguous representation
+}
+```
+*Note:* Since we dequantize at load time, you don't need to write new Matrix Math operations! The existing `ops::matmul` will just process the resultant FP32 tensor normally.

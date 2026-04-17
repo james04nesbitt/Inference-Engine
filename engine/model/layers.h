@@ -32,10 +32,18 @@ public:
   // Weights should already be in [out_features, in_features] → [in, out]
   // transposed layout for efficient matmul.
   Attention(const GemmaConfig &config, int32_t layer_idx, Tensor wq_t,
-            Tensor wk_t, Tensor wv_t, Tensor wo_t)
+            Tensor wk_t, Tensor wv_t, Tensor wo_t,
+            Tensor q_norm_w = Tensor(), Tensor k_norm_w = Tensor())
       : config_(config), layer_idx_(layer_idx), wq_t_(std::move(wq_t)),
         wk_t_(std::move(wk_t)), wv_t_(std::move(wv_t)),
-        wo_t_(std::move(wo_t)) {}
+        wo_t_(std::move(wo_t)) {
+    if (q_norm_w.ndim() > 0) {
+      q_norm_ = std::make_unique<RMSNorm>(std::move(q_norm_w), config_.rms_norm_eps);
+    }
+    if (k_norm_w.ndim() > 0) {
+      k_norm_ = std::make_unique<RMSNorm>(std::move(k_norm_w), config_.rms_norm_eps);
+    }
+  }
 
   Tensor forward(const Tensor &x, int32_t start_pos, KVCacheManager &kv_cache,
                  int64_t seq_id) const;
@@ -44,6 +52,8 @@ private:
   GemmaConfig config_;
   int32_t layer_idx_;
   Tensor wq_t_, wk_t_, wv_t_, wo_t_;
+  std::unique_ptr<RMSNorm> q_norm_;
+  std::unique_ptr<RMSNorm> k_norm_;
 };
 
 // --- Feed-Forward Network (SwiGLU variant) ---

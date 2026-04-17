@@ -122,3 +122,51 @@ Generate one token at a time. Each new token:
 | **Top-P / Nucleus** (p=0.9) | Adaptive vocabulary — uses fewer tokens when model is confident |
 
 Temperature scales logits before softmax: higher = more random, lower = more deterministic.
+
+## Cost & Infrastructure Perspective
+
+### Parameter Distribution & Latency
+An ML Infrastructure engineer must visualize parameters not as numbers, but as bytes flowing across the memory bus:
+- **Embedding Table (1152 × 262,144):** Very large (1.2GB in FP32), but accessed sparsely (one row per token lookup). Negligible cost during decode, but its sheer size strains memory capacity.
+- **Attention (WQ, WK, WV, WO):** Due to GQA (Grouped Query Attention) with 4 heads vs 1 KV head, `W_q` is 4x larger than `W_k` and `W_v`. Total matrix dimensions are relatively small.
+- **FFN (Gate, Up, Down):** The massive 6x expansion ratio (hidden_dim=6912 vs embed_dim=1152) means the Feed-Forward Network accounts for **~65% of the total model weights**.
+
+During generation (N=1), the FFN acts as the primary memory bandwidth bottleneck because all these weights must be streamed in sequentially from RAM per token. This is where INT8 Quantization is most critical.
+
+## Developer Guide: How to Modify the Architecture
+
+If you need to experiment with the model (e.g., adding an adapter like LoRA, changing the activation function, or adding a new normalization technique):
+
+### Example: How to Add a New Matrix (e.g. standard LayerNorm)
+**1. Update the configuration (optional):**
+In `engine/model/config.h`, if your layer needs a new dimension, add it to `GemmaConfig`. e.g. `float layer_norm_eps = 1e-5;`.
+
+**2. Update the Layer definition (`layers.h`):**
+In `engine/model/layers.h`, add the struct or modify `TransformerBlock` to hold the new weights:
+```cpp
+struct LayerNorm {
+  Tensor weight; // scale
+  Tensor bias;   // shift
+  float eps;
+  Tensor forward(const Tensor& x) const;
+};
+```
+
+**3. Implement the forward pass (`layers.cc`):**
+In `engine/model/layers.cc`, write the logic. It's crucial your layer uses existing `ops::` functions to keep execution fast.
+```cpp
+Tensor LayerNorm::forward(const Tensor& x) const {
+  // Call ops:: functions...
+  // Do NOT write raw for-loops here!
+}
+```
+
+**4. Update Model Loader (`InferenceEngine::BuildModel`):**
+In `engine/engine.cc`, find the function `BuildModel()`. This function hooks the incoming `gguf_` parser into the C++ `GemmaModel` classes.
+```cpp
+// Extract weights directly from the GGUF mapping by name
+ie::Tensor weight = gguf_.GetTensorData("blk." + std::to_string(i) + ".ffn_norm.weight");
+// Then pass it into your layer constructor...
+```
+
+**Tip:** If you see "Tensor not found" errors, it's because the strings in `GetTensorData()` must exactly match the internal dictionary names of the `.gguf` file. Use a tool like python's `gguf-dump` to see the exact keys in the model file.

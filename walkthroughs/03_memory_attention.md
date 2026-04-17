@@ -155,5 +155,56 @@ The savings are proportional to how much shorter actual sequences are vs the max
 
 **Copy-on-Write (for beam search):**
 - Multiple beam hypotheses can share KV blocks until one diverges
-- On divergence, only the diverging block is copied
 - Reference counting on blocks enables this without full duplication
+
+## Cost & Infrastructure Perspective
+
+### KV Cache Sizing Math
+As an ML Infra Engineer, determining how much memory to reserve for the KV cache dictates how many concurrent users you can serve.
+The formula for a **single token's KV cache** in FP32 is:
+`Bytes per token = 2 (K and V) × num_layers × num_kv_heads × head_dim × 4 bytes`
+
+For Gemma-3 1B:
+`2 × 26 × 1 × 256 × 4 = 53,248 bytes (~53 KB per token)`
+
+To target `X` concurrent users generating an average of `1,024` tokens:
+`Total Cache Size = 53 KB × 1,024 × X`
+Serving 100 users requires ~5.4 GB of RAM just for the KV Cache.
+
+### Hardware Page Size vs KV Page Size
+Why block_size=16?
+In standard OS virtual memory, a page is typically 4KB.
+Our KV "page" for 16 tokens is: `16 tokens × 26 layers × 1 KV head × 256 dim × 4 bytes × 2 (K+V) = 851,968 bytes (~852 KB)` across the whole network. 
+Per layer, per K/V tensor, a 16-token block is `16 × 256 × 4 = 16 KB`. This aligns perfectly with filling the L1 Data Cache (typically 32KB-48KB) sequentially, maximizing SIMD loading bandwidth without caching eviction. 
+
+## Developer Guide: How to Experiment with Attention
+
+If you want to modify attention (e.g., implement Sliding Window Attention or a custom penalty):
+
+### Step 1: Hook into `flash_attention.cc`
+All attention math happens in `engine/attention/flash_attention.cc`. Let's say you want to add a distance penalty (ALiBi-style):
+1. Navigate to the inner `Q_tile @ K_tile` loop.
+2. After the dot product, apply your penalty:
+```cpp
+// Inside the k_idx loop in flash_attention:
+float distance = std::abs(q_idx - k_idx);
+float penalty = distance * penalty_slope;
+score -= penalty; // Modify the tile score before online softmax
+```
+
+### Step 2: Extracting Attention Maps
+If you want to visualize where the model is looking, you need to abandon Flash Attention (which throws away the raw scores).
+You can write a simple debug attention function:
+```cpp
+Tensor debug_attention(Tensor Q, Tensor K, Tensor V) {
+    // 1. Matmul: scores = Q @ K^T
+    Tensor scores = ops::matmul(Q, ops::transpose(K));
+    
+    // 2. You can now save 'scores' to disk or print it
+    
+    // 3. Softmax & multiply by V
+    Tensor probs = ops::softmax(scores);
+    return ops::matmul(probs, V);
+}
+```
+Swap out the `flash_attention` call in `engine/model/layers.cc` for `debug_attention`, recompile `bazel run //engine:inference`, and you can inspect the attention maps.

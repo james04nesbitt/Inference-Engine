@@ -15,7 +15,7 @@ Tensor RMSNorm::forward(const Tensor &x) const {
 }
 
 // ============================================================================
-// FeedForward::forward — SwiGLU
+// FeedForward::forward — GeGLU (used in Gemma models)
 // ============================================================================
 Tensor FeedForward::forward(const Tensor &x) const {
   Tensor gate = ops::silu(ops::matmul(x, gate_t_));
@@ -44,6 +44,14 @@ Tensor Attention::forward(const Tensor &x, int32_t start_pos,
   K_new = K_new.reshape({seq_len, num_kv_heads, head_dim});
   V_new = V_new.reshape({seq_len, num_kv_heads, head_dim});
 
+  // --- Step 2.5: Apply QK Normalization (for Gemma 2/3) ---
+  if (q_norm_) {
+    Q = q_norm_->forward(Q);
+  }
+  if (k_norm_) {
+    K_new = k_norm_->forward(K_new);
+  }
+
   // --- Step 3: Apply RoPE ---
   Tensor positions({1, seq_len});
   for (int64_t i = 0; i < seq_len; ++i) {
@@ -53,6 +61,8 @@ Tensor Attention::forward(const Tensor &x, int32_t start_pos,
   Q = ops::rope(Q.unsqueeze(0), positions, config_.rope_theta).squeeze(0);
   K_new =
       ops::rope(K_new.unsqueeze(0), positions, config_.rope_theta).squeeze(0);
+
+
 
   // --- Step 4: Update paged KV cache ---
   for (int64_t t = 0; t < seq_len; ++t) {

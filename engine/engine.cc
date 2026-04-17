@@ -70,6 +70,10 @@ std::string InferenceEngine::GenerateStreaming(
   tokens.insert(tokens.begin(), tokenizer_->BosId());
   int32_t prompt_len = static_cast<int32_t>(tokens.size());
 
+  std::cerr << "Input tokens: [";
+  for (int32_t t : tokens) std::cerr << t << ", ";
+  std::cerr << "]\n";
+
   // Step 2: Prefill.
   std::vector<float> token_floats(tokens.size());
   for (size_t i = 0; i < tokens.size(); ++i) {
@@ -86,9 +90,9 @@ std::string InferenceEngine::GenerateStreaming(
   double prefill_ms =
       std::chrono::duration<double, std::milli>(t_prefill - t_start).count();
 
-  // Step 3: Sample first token.
   int32_t next_token = Sample(logits, sampling_config);
   tokens.push_back(next_token);
+  std::cerr << "[GEN_0] " << next_token << std::endl;
 
   if (on_token) {
     std::string decoded = tokenizer_->Decode({next_token});
@@ -109,6 +113,7 @@ std::string InferenceEngine::GenerateStreaming(
     next_token = Sample(logits, sampling_config);
     tokens.push_back(next_token);
     generated_count++;
+    std::cerr << "[GEN_" << generated_count << "] " << next_token << std::endl;
 
     if (on_token) {
       std::string decoded = tokenizer_->Decode({next_token});
@@ -213,6 +218,8 @@ bool InferenceEngine::BuildModel() {
       static_cast<int32_t>(gguf_.GetInt("gemma.vocab_size", 262144));
   config_.rms_norm_eps =
       gguf_.GetFloat("gemma.attention.layer_norm_rms_epsilon", 1e-6f);
+  config_.rope_theta = 
+      gguf_.GetFloat("gemma3.rope.freq_base", gguf_.GetFloat("gemma.rope.freq_base", 1e6f));
 
   std::cout << "\nModel config:"
             << "\n  layers:       " << config_.num_layers
@@ -236,9 +243,30 @@ bool InferenceEngine::BuildModel() {
     // Load weight matrices pre-transposed (fused load + F16→F32 + transpose).
     // This avoids 8 intermediate allocations per layer.
     Tensor wq_t = gguf_.LoadTensorTransposed(prefix + "attn_q.weight");
+    if (i == 0) {
+      Tensor check = wq_t;
+      std::cerr << "L0 wq_t.weight [0..4]: " << check.data<float>()[0] << ", " 
+                << check.data<float>()[1] << ", " << check.data<float>()[2] << ", "
+                << check.data<float>()[3] << ", " << check.data<float>()[4] << std::endl;
+    }
     Tensor wk_t = gguf_.LoadTensorTransposed(prefix + "attn_k.weight");
     Tensor wv_t = gguf_.LoadTensorTransposed(prefix + "attn_v.weight");
     Tensor wo_t = gguf_.LoadTensorTransposed(prefix + "attn_output.weight");
+
+    Tensor q_norm_w;
+    if (gguf_.GetTensorInfo(prefix + "attn_q_norm.weight")) {
+      q_norm_w = gguf_.LoadTensor(prefix + "attn_q_norm.weight");
+      if (i == 0) {
+        Tensor check = q_norm_w.to(DType::kFloat32);
+        std::cerr << "L0 q_norm.weight [0..4]: " << check.data<float>()[0] << ", " 
+                  << check.data<float>()[1] << ", " << check.data<float>()[2] << ", "
+                  << check.data<float>()[3] << ", " << check.data<float>()[4] << std::endl;
+      }
+    }
+    Tensor k_norm_w;
+    if (gguf_.GetTensorInfo(prefix + "attn_k_norm.weight")) {
+      k_norm_w = gguf_.LoadTensor(prefix + "attn_k_norm.weight");
+    }
 
     Tensor gate_t = gguf_.LoadTensorTransposed(prefix + "ffn_gate.weight");
     Tensor up_t = gguf_.LoadTensorTransposed(prefix + "ffn_up.weight");
@@ -249,7 +277,8 @@ bool InferenceEngine::BuildModel() {
 
     RMSNorm attn_norm(std::move(attn_norm_w), config_.rms_norm_eps);
     Attention attn(config_, i, std::move(wq_t), std::move(wk_t),
-                   std::move(wv_t), std::move(wo_t));
+                   std::move(wv_t), std::move(wo_t),
+                   std::move(q_norm_w), std::move(k_norm_w));
     RMSNorm ffn_norm(std::move(ffn_norm_w), config_.rms_norm_eps);
     FeedForward ffn(std::move(gate_t), std::move(up_t), std::move(down_t));
 

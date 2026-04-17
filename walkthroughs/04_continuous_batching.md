@@ -98,3 +98,41 @@ The `BatchScheduler` takes references to `GemmaModel`, `Tokenizer`, and `KVCache
 - The engine can use the model/cache for single-request mode without the scheduler
 - Multiple schedulers could share the same model (e.g., for A/B testing different configs)
 - Testing is easy: create tiny model + cache + tokenizer, pass to scheduler
+
+## Cost & Infrastructure Perspective
+
+### The Latency vs. Throughput Trade-off
+As an ML Infra Engineer, you are constantly battling **Little's Law**: `L = λW` (Average capacity = Arrival rate × Average latency).
+If you increase the batch size (number of concurrently active sequences):
+1. **Throughput (Tokens per Second) goes UP**: You amortize the cost of fetching model weights from RAM across more tokens. The hardware executes more useful FLOPs per byte loaded.
+2. **Latency (Time Per Output Token, TPOT) goes UP**: Each sequence has to wait for all *other* sequences in the batch to complete their decode step before it gets its next token.
+
+### Weight Loading Amortization
+In a pure memory-bound scenario:
+- Loading 1GB of weights at 100GB/s bandwidth takes 10ms.
+- If Batch Size = 1, TPOT is 10ms (100 tokens/sec total).
+- If Batch Size = 10, TPOT is still ~10ms (because the compute time of GEMV is near zero compared to load time). But you generated 10 tokens in that 10ms! Total throughput is now 1,000 tokens/sec. 
+Continuous batching allows you to crank up the batch size up to the point where the CPU's compute FLOPs (or the KV Cache memory limits) Finally become the bottleneck.
+
+## Developer Guide: Customizing the Scheduler
+
+Want to change from Round-Robin to a Priority-based or Length-based scheduler? You only need to modify `BatchScheduler`.
+
+### Step 1: Modifying the Queue Logic
+Currently, `BatchScheduler::PrefillNext()` just pops from the front of the `pending_requests_` vector (FIFO).
+To implement **Shortest-Job-First (estimation)** or **VIP Priority**:
+```cpp
+// Change pending_requests_ from std::vector to a priority queue
+std::priority_queue<Request, std::vector<Request>, PriorityComparer> pending_requests_;
+
+// In AddRequest, assign priority:
+req.priority = is_vip ? 1 : 0;
+pending_requests_.push(req);
+```
+
+### Step 2: Modifying `Step()` Execution
+Currently, `Step()` iterates over all `active_sequences_`. If you want to implement **Preemption** (pausing a sequence if the batch gets too large to maintain a latency SLA):
+1. Inside `Step()`, track `current_tpot_latency`.
+2. If it exceeds your SLA (e.g., 50ms), pop the longest sequence out of `active_sequences_`.
+3. Put it back into a `paused_requests_` queue.
+4. *Crucial:* You do NOT need to free its KV cache (unless you are out of memory). Just leave its `seq_id` allocated. When the queue clears, put it back into `active_sequences_` and it picks up exactly where it left off, context fully intact!
