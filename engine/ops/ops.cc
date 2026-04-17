@@ -341,7 +341,7 @@ Tensor embedding(const Tensor &table, const Tensor &indices) {
   const int64_t embed_dim = table.size(1);
   const int64_t n_tokens = indices.size(0);
 
-  DType out_dtype = table.dtype();
+  // Always work in and return Float32 — downstream ops assume F32.
   Tensor table_f = table.to(DType::kFloat32).contiguous();
   Tensor idx_f = indices.to(DType::kFloat32).contiguous();
   Tensor out = Tensor::zeros({n_tokens, embed_dim}, DType::kFloat32);
@@ -362,7 +362,7 @@ Tensor embedding(const Tensor &table, const Tensor &indices) {
     float *dst = o_data + t * embed_dim;
     std::memcpy(dst, src, static_cast<size_t>(embed_dim) * sizeof(float));
   }
-  return out.to(out_dtype);
+  return out;
 }
 
 } // namespace ops

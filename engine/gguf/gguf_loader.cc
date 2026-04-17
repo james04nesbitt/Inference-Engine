@@ -596,12 +596,15 @@ Tensor GGUFFile::LoadTensor(const std::string &name) const {
   }
 
   // Compute logical shape and element count.
+  // GGUF stores dimensions in column-major order (first dim = most contiguous),
+  // but our Tensor class uses row-major (last dim = most contiguous).
+  // Reverse the dimension order so the shape matches C/row-major convention.
   int64_t numel = 1;
   std::vector<int64_t> shape;
   shape.reserve(info->dimensions.size());
-  for (uint64_t d : info->dimensions) {
-    shape.push_back(static_cast<int64_t>(d));
-    numel *= static_cast<int64_t>(d);
+  for (auto it = info->dimensions.rbegin(); it != info->dimensions.rend(); ++it) {
+    shape.push_back(static_cast<int64_t>(*it));
+    numel *= static_cast<int64_t>(*it);
   }
 
   uint64_t data_pos = tensor_data_offset_ + info->offset;
@@ -713,8 +716,10 @@ Tensor GGUFFile::LoadTensorTransposed(const std::string &name) const {
         std::to_string(info->dimensions.size()) + "D for: " + name);
   }
 
-  int64_t rows = static_cast<int64_t>(info->dimensions[0]);
-  int64_t cols = static_cast<int64_t>(info->dimensions[1]);
+  // GGUF dimensions are column-major: [contiguous_dim, outer_dim]
+  // In row-major (C order), this tensor is [dim1, dim0] = [outer, contiguous]
+  int64_t rows = static_cast<int64_t>(info->dimensions[1]);
+  int64_t cols = static_cast<int64_t>(info->dimensions[0]);
   int64_t numel = rows * cols;
 
   // Output shape is transposed: [cols, rows]
