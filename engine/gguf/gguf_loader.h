@@ -63,6 +63,7 @@ enum class GGMLType : uint32_t {
   kQ5_K = 13,
   kQ6_K = 14,
   kQ8_K = 15,
+  kBF16 = 30, // BFloat16
   // TODO: Add more as needed
 };
 

@@ -26,12 +26,22 @@ struct GemmaConfig {
   // Normalization
   float rms_norm_eps = 1e-6f;      // RMS norm epsilon
 
-  // RoPE
-  float rope_theta = 10000.0f;     // RoPE base frequency
+  // RoPE — Gemma 3 uses different frequencies for local vs global layers
+  float rope_theta_local = 10000.0f;      // Local (sliding window) layers
+  float rope_theta_global = 1000000.0f;   // Global attention layers
+
+  // Sliding window (local attention layers)
+  int32_t sliding_window = 512;
 
   // Derived properties
   int32_t kv_dim() const { return num_kv_heads * head_dim; }
   int32_t q_dim() const { return num_heads * head_dim; }
+
+  // Gemma 3 uses a 5:1 pattern of local:global attention layers
+  bool is_global_layer(int32_t layer_idx) const { return layer_idx % 6 == 5; }
+  float rope_theta_for_layer(int32_t layer_idx) const {
+    return is_global_layer(layer_idx) ? rope_theta_global : rope_theta_local;
+  }
 
   // Populate from GGUF metadata keys.
   // TODO: Implement this to read from GGUFFile metadata

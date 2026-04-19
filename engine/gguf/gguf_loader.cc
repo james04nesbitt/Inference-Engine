@@ -18,6 +18,7 @@ DType GGMLTypeToDType(GGMLType type) {
     return DType::kFloat32;
   case GGMLType::kF16:
     return DType::kFloat16;
+  case GGMLType::kBF16:
   case GGMLType::kQ8_0:
   case GGMLType::kQ4_0:
     // Quantized types are dequantized to FP32 during loading.
@@ -33,6 +34,7 @@ size_t GGMLTypeSize(GGMLType type) {
   case GGMLType::kF32:
     return 4;
   case GGMLType::kF16:
+  case GGMLType::kBF16:
     return 2;
   case GGMLType::kQ8_0:
   case GGMLType::kQ4_0:
@@ -98,6 +100,18 @@ static float Fp16ToFp32(uint16_t h) {
   }
   // Normal number
   uint32_t bits = (sign << 31) | ((exp - 15 + 127) << 23) | (mant << 13);
+  float f;
+  std::memcpy(&f, &bits, sizeof(f));
+  return f;
+}
+
+// ============================================================================
+// BF16 → FP32 conversion helper
+// ============================================================================
+// BFloat16 shares FP32's exponent range (8 bits) with a truncated 7-bit
+// mantissa. Converting to FP32 is just zero-padding the lower 16 bits.
+static float Bf16ToFp32(uint16_t h) {
+  uint32_t bits = static_cast<uint32_t>(h) << 16;
   float f;
   std::memcpy(&f, &bits, sizeof(f));
   return f;
@@ -629,10 +643,25 @@ Tensor GGUFFile::LoadTensor(const std::string &name) const {
                                  DType::kFloat32);
     }
 
+    // BF16: convert to F32 on load (no native BF16 dtype in Tensor).
+    if (info->type == GGMLType::kBF16) {
+      size_t out_bytes = static_cast<size_t>(numel) * sizeof(float);
+      auto buf = std::shared_ptr<uint8_t[]>(new uint8_t[out_bytes]);
+      float *out = reinterpret_cast<float *>(buf.get());
+      const uint16_t *bf16_src = reinterpret_cast<const uint16_t *>(src);
+
+      for (int64_t i = 0; i < numel; ++i) {
+        out[i] = Bf16ToFp32(bf16_src[i]);
+      }
+
+      return Tensor::from_buffer(std::move(buf), std::move(shape),
+                                 DType::kFloat32);
+    }
+
     // Non-quantized types: memcpy from mmap'd memory.
     DType dtype = GGMLTypeToDType(info->type);
     size_t elem_size =
-        (info->type == GGMLType::kF16) ? 2 : GGMLTypeSize(info->type);
+        (info->type == GGMLType::kF16 || info->type == GGMLType::kBF16) ? 2 : GGMLTypeSize(info->type);
     size_t nbytes = static_cast<size_t>(numel) * elem_size;
 
     auto buf = std::shared_ptr<uint8_t[]>(new uint8_t[nbytes]);
@@ -741,6 +770,14 @@ Tensor GGUFFile::LoadTensorTransposed(const std::string &name) const {
       for (int64_t r = 0; r < rows; ++r) {
         for (int64_t c = 0; c < cols; ++c) {
           out[c * rows + r] = Fp16ToFp32(fp16_src[r * cols + c]);
+        }
+      }
+    } else if (info->type == GGMLType::kBF16) {
+      // Fused BF16→F32 conversion + transpose.
+      const uint16_t *bf16_src = reinterpret_cast<const uint16_t *>(src);
+      for (int64_t r = 0; r < rows; ++r) {
+        for (int64_t c = 0; c < cols; ++c) {
+          out[c * rows + r] = Bf16ToFp32(bf16_src[r * cols + c]);
         }
       }
     } else if (info->type == GGMLType::kF32) {

@@ -202,24 +202,42 @@ int32_t InferenceEngine::Sample(const Tensor &logits,
 }
 
 bool InferenceEngine::BuildModel() {
+  // Read model architecture name to determine key prefix.
+  // Gemma 3 GGUFs use "gemma3." prefix; some older ones use "gemma.".
+  std::string arch = gguf_.GetString("general.architecture", "gemma3");
+
+  auto getInt = [&](const std::string &suffix, int64_t def) -> int64_t {
+    int64_t val = gguf_.GetInt(arch + "." + suffix, -1);
+    if (val != -1) return val;
+    return gguf_.GetInt("gemma." + suffix, def);
+  };
+  auto getFloat = [&](const std::string &suffix, float def) -> float {
+    float val = gguf_.GetFloat(arch + "." + suffix, -1.0f);
+    if (val != -1.0f) return val;
+    return gguf_.GetFloat("gemma." + suffix, def);
+  };
+
   config_.num_layers =
-      static_cast<int32_t>(gguf_.GetInt("gemma.block_count", 26));
+      static_cast<int32_t>(getInt("block_count", 26));
   config_.embed_dim =
-      static_cast<int32_t>(gguf_.GetInt("gemma.embedding_length", 1152));
+      static_cast<int32_t>(getInt("embedding_length", 1152));
   config_.num_heads =
-      static_cast<int32_t>(gguf_.GetInt("gemma.attention.head_count", 4));
+      static_cast<int32_t>(getInt("attention.head_count", 4));
   config_.num_kv_heads =
-      static_cast<int32_t>(gguf_.GetInt("gemma.attention.head_count_kv", 1));
+      static_cast<int32_t>(getInt("attention.head_count_kv", 1));
   config_.head_dim =
-      static_cast<int32_t>(gguf_.GetInt("gemma.attention.key_length", 256));
+      static_cast<int32_t>(getInt("attention.key_length", 256));
   config_.hidden_dim =
-      static_cast<int32_t>(gguf_.GetInt("gemma.feed_forward_length", 6912));
+      static_cast<int32_t>(getInt("feed_forward_length", 6912));
   config_.vocab_size =
-      static_cast<int32_t>(gguf_.GetInt("gemma.vocab_size", 262144));
+      static_cast<int32_t>(getInt("vocab_size", 262144));
   config_.rms_norm_eps =
-      gguf_.GetFloat("gemma.attention.layer_norm_rms_epsilon", 1e-6f);
-  config_.rope_theta = 
-      gguf_.GetFloat("gemma3.rope.freq_base", gguf_.GetFloat("gemma.rope.freq_base", 1e6f));
+      getFloat("attention.layer_norm_rms_epsilon", 1e-6f);
+  config_.rope_theta_global =
+      gguf_.GetFloat(arch + ".rope.freq_base", gguf_.GetFloat("gemma.rope.freq_base", 1e6f));
+  config_.rope_theta_local = 10000.0f;
+  config_.sliding_window =
+      static_cast<int32_t>(getInt("attention.sliding_window", 512));
 
   std::cout << "\nModel config:"
             << "\n  layers:       " << config_.num_layers
