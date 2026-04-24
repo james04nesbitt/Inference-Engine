@@ -43,6 +43,7 @@ size_t DTypeSize(DType dtype) {
   case DType::kFloat32:
     return 4;
   case DType::kFloat16:
+  case DType::kBFloat16:
     return 2;
   case DType::kInt8:
     return 1;
@@ -57,6 +58,8 @@ std::string DTypeName(DType dtype) {
     return "float32";
   case DType::kFloat16:
     return "float16";
+  case DType::kBFloat16:
+    return "bfloat16";
   case DType::kInt8:
     return "int8";
   default:
@@ -168,6 +171,23 @@ static uint16_t FloatToHalf(float f) {
   return static_cast<uint16_t>(sign | (exponent << 10) | (mantissa >> 13));
 }
 
+// BF16 ↔ FP32 conversion helpers.
+// BFloat16 shares FP32's exponent (8 bits) with a truncated 7-bit mantissa.
+static float Bf16ToFloat(uint16_t h) {
+  uint32_t bits = static_cast<uint32_t>(h) << 16;
+  float result;
+  std::memcpy(&result, &bits, sizeof(result));
+  return result;
+}
+
+static uint16_t FloatToBf16(float f) {
+  uint32_t bits;
+  std::memcpy(&bits, &f, sizeof(bits));
+  // Round to nearest even: add 0x7FFF + bit 16 for rounding.
+  bits += 0x7FFF + ((bits >> 16) & 1);
+  return static_cast<uint16_t>(bits >> 16);
+}
+
 int64_t Tensor::flat_index(const std::vector<int64_t> &indices) const {
   int64_t idx = 0;
   for (int64_t i = 0; i < ndim(); ++i) {
@@ -183,6 +203,8 @@ float Tensor::at(const std::vector<int64_t> &indices) const {
     return data<float>()[idx];
   case DType::kFloat16:
     return HalfToFloat(data<uint16_t>()[idx]);
+  case DType::kBFloat16:
+    return Bf16ToFloat(data<uint16_t>()[idx]);
   case DType::kInt8:
     return static_cast<float>(data<int8_t>()[idx]);
   }
@@ -197,6 +219,9 @@ void Tensor::set(const std::vector<int64_t> &indices, float value) {
     return;
   case DType::kFloat16:
     data<uint16_t>()[idx] = FloatToHalf(value);
+    return;
+  case DType::kBFloat16:
+    data<uint16_t>()[idx] = FloatToBf16(value);
     return;
   case DType::kInt8:
     data<int8_t>()[idx] = static_cast<int8_t>(value);
@@ -237,6 +262,9 @@ Tensor Tensor::reshape(std::vector<int64_t> new_shape) const {
       break;
     case DType::kFloat16:
       result.data<uint16_t>()[dst_flat] = FloatToHalf(val);
+      break;
+    case DType::kBFloat16:
+      result.data<uint16_t>()[dst_flat] = FloatToBf16(val);
       break;
     case DType::kInt8:
       result.data<int8_t>()[dst_flat] = static_cast<int8_t>(val);
@@ -314,6 +342,9 @@ void Tensor::fill(float val) {
       case DType::kFloat16:
         data<uint16_t>()[i] = FloatToHalf(val);
         break;
+      case DType::kBFloat16:
+        data<uint16_t>()[i] = FloatToBf16(val);
+        break;
       case DType::kInt8:
         data<int8_t>()[i] = static_cast<int8_t>(val);
         break;
@@ -347,6 +378,9 @@ Tensor Tensor::contiguous() const {
       break;
     case DType::kFloat16:
       result.data<uint16_t>()[dst_flat] = FloatToHalf(val);
+      break;
+    case DType::kBFloat16:
+      result.data<uint16_t>()[dst_flat] = FloatToBf16(val);
       break;
     case DType::kInt8:
       result.data<int8_t>()[dst_flat] = static_cast<int8_t>(val);

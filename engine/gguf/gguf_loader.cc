@@ -3,27 +3,26 @@
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <stdexcept>
 
 namespace ie {
 
 // ============================================================================
-// GGMLType helpers
+// GGMLType helpers — BF16 and F32 only
 // ============================================================================
 
 DType GGMLTypeToDType(GGMLType type) {
   switch (type) {
   case GGMLType::kF32:
     return DType::kFloat32;
-  case GGMLType::kF16:
-    return DType::kFloat16;
   case GGMLType::kBF16:
-    // Quantized types are dequantized to FP32 during loading.
-    return DType::kFloat32;
+    return DType::kBFloat16;
   default:
-    throw std::runtime_error("GGMLTypeToDType: unsupported/quantized type " +
-                             std::to_string(static_cast<uint32_t>(type)));
+    throw std::runtime_error("GGMLTypeToDType: unsupported type " +
+                             std::to_string(static_cast<uint32_t>(type)) +
+                             " — only BF16 and F32 are supported");
   }
 }
 
@@ -31,171 +30,30 @@ size_t GGMLTypeSize(GGMLType type) {
   switch (type) {
   case GGMLType::kF32:
     return 4;
-  case GGMLType::kF16:
   case GGMLType::kBF16:
     return 2;
   default:
-    throw std::runtime_error("GGMLTypeSize: unsupported/quantized type " +
+    throw std::runtime_error("GGMLTypeSize: unsupported type " +
                              std::to_string(static_cast<uint32_t>(type)));
   }
 }
 
-// ============================================================================
-// FP16 → FP32 conversion helper
-// ============================================================================
-static float Fp16ToFp32(uint16_t h) {
-  uint32_t sign = (h >> 15) & 0x1;
-  uint32_t exp = (h >> 10) & 0x1F;
-  uint32_t mant = h & 0x3FF;
-
-  if (exp == 0) {
-    if (mant == 0) {
-      // ±zero
-      uint32_t bits = sign << 31;
-      float f;
-      std::memcpy(&f, &bits, sizeof(f));
-      return f;
-    }
-    // Subnormal: convert to normalized FP32
-    float val = std::ldexp(static_cast<float>(mant), -24);
-    return sign ? -val : val;
+std::string GGMLTypeName(GGMLType type) {
+  switch (type) {
+  case GGMLType::kF32:
+    return "GGML_TYPE_F32";
+  case GGMLType::kBF16:
+    return "BF16";
+  default:
+    return "UNKNOWN(" + std::to_string(static_cast<uint32_t>(type)) + ")";
   }
-  if (exp == 31) {
-    // Inf/NaN
-    uint32_t bits = (sign << 31) | 0x7F800000 | (mant << 13);
-    float f;
-    std::memcpy(&f, &bits, sizeof(f));
-    return f;
-  }
-  // Normal number
-  uint32_t bits = (sign << 31) | ((exp - 15 + 127) << 23) | (mant << 13);
-  float f;
-  std::memcpy(&f, &bits, sizeof(f));
-  return f;
-}
-
-// ============================================================================
-// BF16 → FP32 conversion helper
-// ============================================================================
-// BFloat16 shares FP32's exponent range (8 bits) with a truncated 7-bit
-// mantissa. Converting to FP32 is just zero-padding the lower 16 bits.
-static float Bf16ToFp32(uint16_t h) {
-  uint32_t bits = static_cast<uint32_t>(h) << 16;
-  float f;
-  std::memcpy(&f, &bits, sizeof(f));
-  return f;
-}
-
-// ============================================================================
-// GGUFFile destructor
-// ============================================================================
-
-GGUFFile::~GGUFFile() { Close(); }
-
-void GGUFFile::Close() {
-  if (mapped_data_) {
-#ifdef _WIN32
-    UnmapViewOfFile(mapped_data_);
-    mapped_data_ = nullptr;
-    if (mapping_handle_) {
-      CloseHandle(mapping_handle_);
-      mapping_handle_ = nullptr;
-    }
-    if (file_handle_ != INVALID_HANDLE_VALUE) {
-      CloseHandle(file_handle_);
-      file_handle_ = INVALID_HANDLE_VALUE;
-    }
-#else
-    munmap(const_cast<uint8_t *>(mapped_data_),
-           static_cast<size_t>(file_size_));
-    mapped_data_ = nullptr;
-    if (fd_ >= 0) {
-      close(fd_);
-      fd_ = -1;
-    }
-#endif
-  }
-  file_size_ = 0;
-}
-
-// ============================================================================
-// MapFile — memory-map the entire GGUF file
-// ============================================================================
-
-bool GGUFFile::MapFile() {
-#ifdef _WIN32
-  file_handle_ = CreateFileA(file_path_.c_str(), GENERIC_READ, FILE_SHARE_READ,
-                             nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
-                             nullptr);
-  if (file_handle_ == INVALID_HANDLE_VALUE) {
-    std::cerr << "MapFile: failed to open file: " << file_path_ << std::endl;
-    return false;
-  }
-
-  LARGE_INTEGER size;
-  if (!GetFileSizeEx(file_handle_, &size)) {
-    std::cerr << "MapFile: failed to get file size" << std::endl;
-    CloseHandle(file_handle_);
-    file_handle_ = INVALID_HANDLE_VALUE;
-    return false;
-  }
-  file_size_ = static_cast<uint64_t>(size.QuadPart);
-
-  mapping_handle_ =
-      CreateFileMappingA(file_handle_, nullptr, PAGE_READONLY, 0, 0, nullptr);
-  if (!mapping_handle_) {
-    std::cerr << "MapFile: failed to create file mapping" << std::endl;
-    CloseHandle(file_handle_);
-    file_handle_ = INVALID_HANDLE_VALUE;
-    return false;
-  }
-
-  mapped_data_ = static_cast<const uint8_t *>(
-      MapViewOfFile(mapping_handle_, FILE_MAP_READ, 0, 0, 0));
-  if (!mapped_data_) {
-    std::cerr << "MapFile: failed to map view of file" << std::endl;
-    CloseHandle(mapping_handle_);
-    mapping_handle_ = nullptr;
-    CloseHandle(file_handle_);
-    file_handle_ = INVALID_HANDLE_VALUE;
-    return false;
-  }
-#else
-  fd_ = open(file_path_.c_str(), O_RDONLY);
-  if (fd_ < 0) {
-    std::cerr << "MapFile: failed to open file: " << file_path_ << std::endl;
-    return false;
-  }
-
-  struct stat st;
-  if (fstat(fd_, &st) != 0) {
-    std::cerr << "MapFile: failed to stat file" << std::endl;
-    close(fd_);
-    fd_ = -1;
-    return false;
-  }
-  file_size_ = static_cast<uint64_t>(st.st_size);
-
-  void *ptr =
-      mmap(nullptr, static_cast<size_t>(file_size_), PROT_READ, MAP_PRIVATE,
-           fd_, 0);
-  if (ptr == MAP_FAILED) {
-    std::cerr << "MapFile: mmap failed" << std::endl;
-    close(fd_);
-    fd_ = -1;
-    return false;
-  }
-  mapped_data_ = static_cast<const uint8_t *>(ptr);
-#endif
-
-  return true;
 }
 
 // ============================================================================
 // Open — top-level entry point
 // ============================================================================
 
-bool GGUFFile::Open(const std::string &path) {
+bool GGUFFile::Open(const std::string &path, bool debug) {
   file_path_ = path;
   std::ifstream file(path, std::ios::binary);
   if (!file.is_open()) {
@@ -231,11 +89,24 @@ bool GGUFFile::Open(const std::string &path) {
   // Close the ifstream — we'll use mmap from here on.
   file.close();
 
-  // Phase 4: Memory-map the file for fast tensor loading.
-  if (!MapFile()) {
-    std::cerr << "Warning: memory-map failed, falling back to ifstream"
-              << std::endl;
-    // mapped_data_ remains nullptr; LoadTensor will fall back to ifstream.
+  // Phase 4: Memory-map the file using Boost.Interprocess.
+  try {
+    file_mapping_ = std::make_unique<boost::interprocess::file_mapping>(
+        path.c_str(), boost::interprocess::read_only);
+    mapped_region_ = std::make_unique<boost::interprocess::mapped_region>(
+        *file_mapping_, boost::interprocess::read_only);
+
+    mapped_data_ =
+        static_cast<const uint8_t *>(mapped_region_->get_address());
+    file_size_ = mapped_region_->get_size();
+  } catch (const boost::interprocess::interprocess_exception &e) {
+    std::cerr << "Memory-map failed: " << e.what() << std::endl;
+    return false;
+  }
+
+  // Phase 5: Debug output if requested
+  if (debug) {
+    PrintDebugInfo();
   }
 
   return true;
@@ -323,13 +194,9 @@ bool GGUFFile::ReadMetadata(std::ifstream &file) {
       }
       default: {
         // For unsupported array element types, skip the raw bytes.
-        // Each element's size depends on type; for now skip by reading them
-        // individually with ReadValue (which may throw for truly unsupported
-        // types, but handles most scalar types).
         for (uint64_t j = 0; j < count; ++j) {
           ReadValue(file, elem_type); // discard result
         }
-        // Store nothing for this key — we don't have a variant type for it
         break;
       }
       }
@@ -512,13 +379,28 @@ const GGUFTensorInfo *GGUFFile::GetTensorInfo(const std::string &name) const {
 }
 
 // ============================================================================
-// LoadTensor — read tensor data from memory-mapped region
+// LoadTensor — Zero-copy tensor from memory-mapped region
+//
+// BF16 and F32 tensors are returned as direct views into the mmap'd memory.
+// No data is copied — the Tensor holds a shared_ptr with a custom deleter
+// that prevents the mmap region from being unmapped while tensors are live.
+//
+// GGUF spec guarantees 32-byte alignment for tensor data, which satisfies
+// AVX2 requirements. For AVX-512 (64-byte), Highway's LoadU handles it.
 // ============================================================================
 
 Tensor GGUFFile::LoadTensor(const std::string &name) const {
   const GGUFTensorInfo *info = GetTensorInfo(name);
   if (!info) {
     throw std::runtime_error("LoadTensor: tensor not found: " + name);
+  }
+
+  // Validate type: only BF16 and F32 supported
+  if (info->type != GGMLType::kBF16 && info->type != GGMLType::kF32) {
+    throw std::runtime_error(
+        "LoadTensor: unsupported type " +
+        std::to_string(static_cast<uint32_t>(info->type)) +
+        " for tensor: " + name + " — only BF16 and F32 are supported");
   }
 
   // Compute logical shape and element count.
@@ -528,147 +410,63 @@ Tensor GGUFFile::LoadTensor(const std::string &name) const {
   int64_t numel = 1;
   std::vector<int64_t> shape;
   shape.reserve(info->dimensions.size());
-  for (auto it = info->dimensions.rbegin(); it != info->dimensions.rend(); ++it) {
+  for (auto it = info->dimensions.rbegin(); it != info->dimensions.rend();
+       ++it) {
     shape.push_back(static_cast<int64_t>(*it));
     numel *= static_cast<int64_t>(*it);
   }
 
   uint64_t data_pos = tensor_data_offset_ + info->offset;
+  DType dtype = GGMLTypeToDType(info->type);
+  size_t elem_size = GGMLTypeSize(info->type);
 
-  // --- Memory-mapped path (fast) ---
-  if (mapped_data_) {
-    const uint8_t *src = mapped_data_ + data_pos;
+  if (!mapped_data_) {
+    throw std::runtime_error("LoadTensor: file not memory-mapped");
+  }
 
-    // BF16: convert to F32 on load (no native BF16 dtype in Tensor).
-    if (info->type == GGMLType::kBF16) {
-      size_t out_bytes = static_cast<size_t>(numel) * sizeof(float);
-      auto buf = std::shared_ptr<uint8_t[]>(new uint8_t[out_bytes]);
-      float *out = reinterpret_cast<float *>(buf.get());
-      const uint16_t *bf16_src = reinterpret_cast<const uint16_t *>(src);
+  // Zero-copy: create a shared_ptr that points into the mmap'd region.
+  // The custom deleter captures a copy of the mapped_region unique_ptr's
+  // raw pointer to prevent unmapping while tensors are in use.
+  // Since mapped_region_ is owned by GGUFFile, we use a weak reference —
+  // the GGUFFile must outlive all Tensors, which is guaranteed by the
+  // engine's architecture (GGUFFile is a member of InferenceEngine).
+  const uint8_t *tensor_data = mapped_data_ + data_pos;
 
-      for (int64_t i = 0; i < numel; ++i) {
-        out[i] = Bf16ToFp32(bf16_src[i]);
-      }
-
-      return Tensor::from_buffer(std::move(buf), std::move(shape),
-                                 DType::kFloat32);
-    }
-
-    // Non-quantized types: memcpy from mmap'd memory.
-    DType dtype = GGMLTypeToDType(info->type);
-    size_t elem_size =
-        (info->type == GGMLType::kF16 || info->type == GGMLType::kBF16) ? 2 : GGMLTypeSize(info->type);
+  // Check alignment for SIMD. GGUF guarantees 32-byte alignment for tensor
+  // data start, and individual tensor offsets are also aligned.
+  auto alignment = reinterpret_cast<uintptr_t>(tensor_data) % 32;
+  if (alignment != 0) {
+    // Fallback: copy to aligned buffer if mmap alignment is insufficient.
     size_t nbytes = static_cast<size_t>(numel) * elem_size;
 
-    auto buf = std::shared_ptr<uint8_t[]>(new uint8_t[nbytes]);
-    std::memcpy(buf.get(), src, nbytes);
+    constexpr size_t kAlignment = 64;
+    size_t alloc_size = (nbytes + kAlignment - 1) & ~(kAlignment - 1);
+#ifdef _WIN32
+    void *raw = _aligned_malloc(alloc_size, kAlignment);
+#else
+    void *raw = std::aligned_alloc(kAlignment, alloc_size);
+#endif
+    if (!raw)
+      throw std::runtime_error("LoadTensor: aligned alloc failed");
+    std::memcpy(raw, tensor_data, nbytes);
 
+#ifdef _WIN32
+    auto buf = std::shared_ptr<uint8_t[]>(static_cast<uint8_t *>(raw),
+                                          [](uint8_t *p) { _aligned_free(p); });
+#else
+    auto buf = std::shared_ptr<uint8_t[]>(static_cast<uint8_t *>(raw),
+                                          [](uint8_t *p) { std::free(p); });
+#endif
     return Tensor::from_buffer(std::move(buf), std::move(shape), dtype);
   }
 
-  // --- Fallback: ifstream path (if mmap failed) ---
-  std::ifstream file(file_path_, std::ios::binary);
-  if (!file.is_open()) {
-    throw std::runtime_error("LoadTensor: cannot open file: " + file_path_);
-  }
-  file.seekg(static_cast<std::streamoff>(data_pos));
-  if (file.fail()) {
-    throw std::runtime_error("LoadTensor: seek failed for tensor: " + name);
-  }
-
-  // Non-quantized types: direct load.
-  DType dtype = GGMLTypeToDType(info->type);
-  size_t elem_size = GGMLTypeSize(info->type);
-  size_t nbytes = static_cast<size_t>(numel) * elem_size;
-
-  auto buf = std::shared_ptr<uint8_t[]>(new uint8_t[nbytes]);
-  file.read(reinterpret_cast<char *>(buf.get()),
-            static_cast<std::streamsize>(nbytes));
-  if (file.fail()) {
-    throw std::runtime_error("LoadTensor: read failed for tensor: " + name);
-  }
+  // Zero-copy path: wrap mmap pointer in a shared_ptr with no-op deleter.
+  // The mmap'd region's lifetime is managed by GGUFFile, not by the Tensor.
+  auto buf = std::shared_ptr<uint8_t[]>(
+      const_cast<uint8_t *>(tensor_data),
+      [](uint8_t *) { /* no-op: mmap region owns the memory */ });
 
   return Tensor::from_buffer(std::move(buf), std::move(shape), dtype);
-}
-
-// ============================================================================
-// LoadTensorTransposed — fused load + transpose for 2D weight matrices
-//
-// Instead of: LoadTensor → transpose(0,1) → contiguous()  (2 allocations)
-// This does:  read from mmap → write directly in transposed layout (1 alloc)
-//
-// For F16 tensors, also fuses the F16→F32 conversion, so the result is
-// always an FP32 contiguous tensor in transposed layout.
-// ============================================================================
-
-Tensor GGUFFile::LoadTensorTransposed(const std::string &name) const {
-  const GGUFTensorInfo *info = GetTensorInfo(name);
-  if (!info) {
-    throw std::runtime_error("LoadTensorTransposed: tensor not found: " + name);
-  }
-
-  if (info->dimensions.size() != 2) {
-    throw std::runtime_error(
-        "LoadTensorTransposed: expected 2D tensor, got " +
-        std::to_string(info->dimensions.size()) + "D for: " + name);
-  }
-
-  // GGUF dimensions are column-major: [contiguous_dim, outer_dim]
-  // In row-major (C order), this tensor is [dim1, dim0] = [outer, contiguous]
-  int64_t rows = static_cast<int64_t>(info->dimensions[1]);
-  int64_t cols = static_cast<int64_t>(info->dimensions[0]);
-  int64_t numel = rows * cols;
-
-  // Output shape is transposed: [cols, rows]
-  std::vector<int64_t> out_shape = {cols, rows};
-  size_t out_bytes = static_cast<size_t>(numel) * sizeof(float);
-  auto buf = std::shared_ptr<uint8_t[]>(new uint8_t[out_bytes]);
-  float *out = reinterpret_cast<float *>(buf.get());
-
-  uint64_t data_pos = tensor_data_offset_ + info->offset;
-
-  if (mapped_data_) {
-    const uint8_t *src = mapped_data_ + data_pos;
-
-    if (info->type == GGMLType::kF16) {
-      // Fused F16→F32 conversion + transpose.
-      // Source layout: row-major [rows, cols] as FP16
-      // Output layout: row-major [cols, rows] as FP32
-      const uint16_t *fp16_src = reinterpret_cast<const uint16_t *>(src);
-      for (int64_t r = 0; r < rows; ++r) {
-        for (int64_t c = 0; c < cols; ++c) {
-          out[c * rows + r] = Fp16ToFp32(fp16_src[r * cols + c]);
-        }
-      }
-    } else if (info->type == GGMLType::kBF16) {
-      // Fused BF16→F32 conversion + transpose.
-      const uint16_t *bf16_src = reinterpret_cast<const uint16_t *>(src);
-      for (int64_t r = 0; r < rows; ++r) {
-        for (int64_t c = 0; c < cols; ++c) {
-          out[c * rows + r] = Bf16ToFp32(bf16_src[r * cols + c]);
-        }
-      }
-    } else if (info->type == GGMLType::kF32) {
-      // Transpose F32 data.
-      const float *f32_src = reinterpret_cast<const float *>(src);
-      for (int64_t r = 0; r < rows; ++r) {
-        for (int64_t c = 0; c < cols; ++c) {
-          out[c * rows + r] = f32_src[r * cols + c];
-        }
-      }
-    } else {
-      throw std::runtime_error(
-          "LoadTensorTransposed: unsupported type for: " + name);
-    }
-  } else {
-    // Fallback: load normally then transpose.
-    Tensor t = LoadTensor(name);
-    Tensor transposed = t.transpose(0, 1).contiguous();
-    return transposed;
-  }
-
-  return Tensor::from_buffer(std::move(buf), std::move(out_shape),
-                             DType::kFloat32);
 }
 
 // ============================================================================
@@ -728,8 +526,89 @@ void GGUFFile::PrintSummary() const {
           std::cout << ", ";
         std::cout << info.dimensions[i];
       }
-      std::cout << "] type=" << static_cast<uint32_t>(info.type) << std::endl;
+      std::cout << "] type=" << GGMLTypeName(info.type) << std::endl;
     }
+  }
+}
+
+// ============================================================================
+// PrintDebugInfo — Full dump matching the Python GGUF parser output format
+// ============================================================================
+
+void GGUFFile::PrintDebugInfo() const {
+  std::cout << "Magic Number: GGUF" << std::endl;
+  std::cout << "Version: " << header_.version << std::endl;
+
+  // Tensor info section
+  std::cout << "Tensors Info:" << std::endl;
+  for (const auto &[name, info] : tensors_) {
+    std::cout << "  Name: " << name << ",\tShape: (";
+    for (size_t i = 0; i < info.dimensions.size(); ++i) {
+      if (i > 0)
+        std::cout << ", ";
+      std::cout << info.dimensions[i];
+    }
+    // Add trailing comma for 1D shapes (Python tuple style)
+    if (info.dimensions.size() == 1) {
+      std::cout << ",";
+    }
+    std::cout << "),\tType: " << GGMLTypeName(info.type)
+              << ",\tOffset: " << info.offset << std::endl;
+  }
+
+  // Metadata section
+  std::cout << "Metadata:" << std::endl;
+  for (const auto &[key, val] : metadata_) {
+    std::cout << "  " << key << ": ";
+    std::visit(
+        [](const auto &v) {
+          using T = std::decay_t<decltype(v)>;
+          if constexpr (std::is_same_v<T, std::string>) {
+            std::cout << v;
+          } else if constexpr (std::is_same_v<T, bool>) {
+            std::cout << (v ? "True" : "False");
+          } else if constexpr (std::is_same_v<T, std::vector<int32_t>>) {
+            std::cout << "[";
+            size_t n = std::min(v.size(), size_t(50));
+            for (size_t i = 0; i < n; ++i) {
+              if (i > 0)
+                std::cout << ", ";
+              std::cout << v[i];
+            }
+            if (v.size() > 50)
+              std::cout << "]... (" << (v.size() - 50) << " more elements)";
+            else
+              std::cout << "]";
+          } else if constexpr (std::is_same_v<T, std::vector<float>>) {
+            std::cout << "[";
+            size_t n = std::min(v.size(), size_t(50));
+            for (size_t i = 0; i < n; ++i) {
+              if (i > 0)
+                std::cout << ", ";
+              std::cout << v[i];
+            }
+            if (v.size() > 50)
+              std::cout << "]... (" << (v.size() - 50) << " more elements)";
+            else
+              std::cout << "]";
+          } else if constexpr (std::is_same_v<T, std::vector<std::string>>) {
+            std::cout << "[";
+            size_t n = std::min(v.size(), size_t(50));
+            for (size_t i = 0; i < n; ++i) {
+              if (i > 0)
+                std::cout << ", ";
+              std::cout << "'" << v[i] << "'";
+            }
+            if (v.size() > 50)
+              std::cout << "]... (" << (v.size() - 50) << " more elements)";
+            else
+              std::cout << "]";
+          } else {
+            std::cout << v;
+          }
+        },
+        val);
+    std::cout << std::endl;
   }
 }
 

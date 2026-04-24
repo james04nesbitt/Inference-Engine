@@ -13,6 +13,7 @@ namespace ie {
 enum class DType {
   kFloat32,
   kFloat16,
+  kBFloat16,
   kInt8,
 };
 

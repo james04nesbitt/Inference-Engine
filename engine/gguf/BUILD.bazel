@@ -7,6 +7,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "//engine/tensor",
+        "@boost.interprocess//:boost.interprocess",
     ],
 )
 

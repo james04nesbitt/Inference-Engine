@@ -3,18 +3,13 @@
 #include <cstdint>
 #include <fstream>
 #include <map>
+#include <memory>
 #include <string>
 #include <variant>
 #include <vector>
 
-#ifdef _WIN32
-#include <windows.h>
-#else
-#include <fcntl.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <unistd.h>
-#endif
+#include <boost/interprocess/file_mapping.hpp>
+#include <boost/interprocess/mapped_region.hpp>
 
 #include "engine/tensor/tensor.h"
 
@@ -45,36 +40,22 @@ enum class GGUFValueType : uint32_t {
 };
 
 // ============================================================================
-// GGUF tensor types — maps to quantization formats.
-// Start with F32 and F16, add quantized types as you learn them.
+// GGUF tensor types — only BF16 and F32 are supported.
+// This engine exclusively loads BF16-quantized GGUF files.
 // ============================================================================
 enum class GGMLType : uint32_t {
   kF32 = 0,
-  kF16 = 1,
-  kQ4_0 = 2,
-  kQ4_1 = 3,
-  kQ5_0 = 6,
-  kQ5_1 = 7,
-  kQ8_0 = 8,
-  kQ8_1 = 9,
-  kQ2_K = 10,
-  kQ3_K = 11,
-  kQ4_K = 12,
-  kQ5_K = 13,
-  kQ6_K = 14,
-  kQ8_K = 15,
   kBF16 = 30, // BFloat16
-  // TODO: Add more as needed
 };
 
 // Convert GGMLType to our Tensor DType.
-// Throws for quantized types that are not yet supported.
 DType GGMLTypeToDType(GGMLType type);
 
 // Returns the number of bytes per element for a given GGMLType.
-// For block-quantized types, returns the output element size (FP32 = 4).
 size_t GGMLTypeSize(GGMLType type);
 
+// Returns a human-readable name for a GGMLType.
+std::string GGMLTypeName(GGMLType type);
 
 // ============================================================================
 // Parsed structures from a GGUF file
@@ -104,28 +85,29 @@ struct GGUFTensorInfo {
 };
 
 // ============================================================================
-// GGUFFile — Reads and provides access to a GGUF model file.
+// GGUFFile — Reads and provides access to a BF16 GGUF model file.
 //
-// Uses memory-mapped I/O for zero-copy tensor loading. The file is mapped
-// once in Open() and all tensor reads go through the mapped memory region,
-// eliminating per-tensor file open/seek/read overhead.
+// Uses Boost.Interprocess memory-mapped I/O for zero-copy tensor loading.
+// BF16 tensors are returned as views into the mmap'd region — no data is
+// copied. The mmap region owns the memory; tensors hold a shared_ptr to
+// the GGUFFile to prevent it from being destroyed while tensors are live.
+//
+// Only BF16 and F32 tensor types are supported.
 // ============================================================================
-class GGUFFile {
+class GGUFFile : public std::enable_shared_from_this<GGUFFile> {
 public:
   GGUFFile() = default;
-  ~GGUFFile();
+  ~GGUFFile() = default;
 
-  // Non-copyable due to mmap resources.
+  // Non-copyable (owns mmap resources).
   GGUFFile(const GGUFFile &) = delete;
   GGUFFile &operator=(const GGUFFile &) = delete;
 
-  // Opens and parses the GGUF file header and metadata.
-  // Memory-maps the entire file for fast tensor loading.
+  // Opens and parses the GGUF file header, metadata, and tensor info.
+  // Memory-maps the entire file for zero-copy tensor loading.
+  // If debug=true, prints all metadata and tensor info to stdout.
   // Returns false on failure.
-  bool Open(const std::string &path);
-
-  // Closes the memory-mapped file and releases resources.
-  void Close();
+  bool Open(const std::string &path, bool debug = false);
 
   // --- Accessors ---
   const GGUFHeader &header() const { return header_; }
@@ -146,23 +128,20 @@ public:
   // Get info about a specific tensor by name.
   const GGUFTensorInfo *GetTensorInfo(const std::string &name) const;
 
-  // Load a tensor's data into a Tensor object.
-  // Reads directly from memory-mapped region — no file I/O per call.
+  // Load a tensor as a zero-copy view into the mmap'd file.
+  // BF16 tensors → DType::kBFloat16, F32 tensors → DType::kFloat32.
+  // The returned Tensor shares ownership of the mmap region.
   Tensor LoadTensor(const std::string &name) const;
-
-  // Load a 2D tensor and transpose it in a single fused pass.
-  // Avoids the intermediate allocation from separate load + transpose +
-  // contiguous. For F16 tensors, also fuses the F16→F32 conversion.
-  //
-  // Input shape in GGUF: [rows, cols]
-  // Output Tensor shape:  [cols, rows] (transposed, contiguous)
-  Tensor LoadTensorTransposed(const std::string &name) const;
 
   // List all tensor names.
   std::vector<std::string> TensorNames() const;
 
-  // Print a summary of the file contents.
+  // Print a summary of the file contents (first 10 tensors).
   void PrintSummary() const;
+
+  // Print full debug info: all metadata + all tensors with shapes/types/offsets.
+  // Output format matches the Python GGUF parser reference.
+  void PrintDebugInfo() const;
 
 private:
   GGUFHeader header_{};
@@ -172,22 +151,18 @@ private:
   uint64_t tensor_data_offset_ = 0; // Byte offset where tensor data starts
   uint64_t file_size_ = 0;
 
-  // Memory-mapped file state
+  // Boost.Interprocess memory-mapped file.
+  // Replaces ~80 lines of Win32/POSIX mmap code with 2 objects.
+  std::unique_ptr<boost::interprocess::file_mapping> file_mapping_;
+  std::unique_ptr<boost::interprocess::mapped_region> mapped_region_;
+
+  // Raw pointer into the mapped region (convenience).
   const uint8_t *mapped_data_ = nullptr;
-#ifdef _WIN32
-  HANDLE file_handle_ = INVALID_HANDLE_VALUE;
-  HANDLE mapping_handle_ = nullptr;
-#else
-  int fd_ = -1;
-#endif
 
   // --- Internal parsing helpers ---
   bool ReadHeader(std::ifstream &file);
   bool ReadMetadata(std::ifstream &file);
   bool ReadTensorInfos(std::ifstream &file);
-
-  // Memory-map the file. Called from Open() after parsing headers.
-  bool MapFile();
 
   // Low-level read helpers
   std::string ReadString(std::ifstream &file);

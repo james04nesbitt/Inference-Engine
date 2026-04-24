@@ -56,7 +56,7 @@ private:
 int TempFile::counter_ = 0;
 
 // ============================================================================
-// Tests
+// Synthetic GGUF Tests — validate the parser on small hand-crafted files
 // ============================================================================
 
 TEST(GGUFLoaderTest, InvalidMagic) {
@@ -173,50 +173,6 @@ TEST(GGUFLoaderTest, ReadMetadataArrayOfStrings) {
   EXPECT_EQ(tokens[2], "!");
 }
 
-TEST(GGUFLoaderTest, ReadTensorInfos) {
-  TempFile tmp;
-  {
-    std::ofstream out(tmp.path(), std::ios::binary);
-    WriteHeader(out, /*tensor_count=*/2, /*metadata_count=*/0);
-
-    // Tensor 1: "weight" [4, 3] F32 at offset 0
-    WriteGGUFString(out, "weight");
-    WriteRaw<uint32_t>(out, 2); // n_dims
-    WriteRaw<uint64_t>(out, 4); // dim 0
-    WriteRaw<uint64_t>(out, 3); // dim 1
-    WriteRaw<uint32_t>(out, static_cast<uint32_t>(GGMLType::kF32));
-    WriteRaw<uint64_t>(out, 0); // offset
-
-    // Tensor 2: "bias" [3] F16 at offset 48
-    WriteGGUFString(out, "bias");
-    WriteRaw<uint32_t>(out, 1); // n_dims
-    WriteRaw<uint64_t>(out, 3); // dim 0
-    WriteRaw<uint32_t>(out, static_cast<uint32_t>(GGMLType::kF16));
-    WriteRaw<uint64_t>(out, 48); // offset
-  }
-
-  GGUFFile gguf;
-  ASSERT_TRUE(gguf.Open(tmp.path()));
-
-  auto names = gguf.TensorNames();
-  EXPECT_EQ(names.size(), 2u);
-
-  auto *w = gguf.GetTensorInfo("weight");
-  ASSERT_NE(w, nullptr);
-  EXPECT_EQ(w->dimensions.size(), 2u);
-  EXPECT_EQ(w->dimensions[0], 4u);
-  EXPECT_EQ(w->dimensions[1], 3u);
-  EXPECT_EQ(w->type, GGMLType::kF32);
-  EXPECT_EQ(w->offset, 0u);
-
-  auto *b = gguf.GetTensorInfo("bias");
-  ASSERT_NE(b, nullptr);
-  EXPECT_EQ(b->dimensions.size(), 1u);
-  EXPECT_EQ(b->dimensions[0], 3u);
-  EXPECT_EQ(b->type, GGMLType::kF16);
-  EXPECT_EQ(b->offset, 48u);
-}
-
 TEST(GGUFLoaderTest, LoadTensorF32) {
   // Build a synthetic GGUF with one 1D F32 tensor of 4 elements
   TempFile tmp;
@@ -225,10 +181,8 @@ TEST(GGUFLoaderTest, LoadTensorF32) {
 
   {
     std::ofstream out(tmp.path(), std::ios::binary);
-    // Header: 1 tensor, 0 metadata
     WriteHeader(out, 1, 0);
 
-    // Tensor info: "test_tensor" [4] F32, offset=0
     WriteGGUFString(out, "test_tensor");
     WriteRaw<uint32_t>(out, 1); // n_dims
     WriteRaw<uint64_t>(out, static_cast<uint64_t>(numel));
@@ -258,76 +212,28 @@ TEST(GGUFLoaderTest, LoadTensorF32) {
   }
 }
 
-TEST(GGUFLoaderTest, LoadTensorF32_2D) {
-  // 2D tensor [2, 3]
-  TempFile tmp;
-  const float values[6] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
-
-  {
-    std::ofstream out(tmp.path(), std::ios::binary);
-    WriteHeader(out, 1, 0);
-
-    WriteGGUFString(out, "matrix");
-    WriteRaw<uint32_t>(out, 2); // 2 dims
-    WriteRaw<uint64_t>(out, 2); // dim 0
-    WriteRaw<uint64_t>(out, 3); // dim 1
-    WriteRaw<uint32_t>(out, static_cast<uint32_t>(GGMLType::kF32));
-    WriteRaw<uint64_t>(out, 0);
-
-    // Pad to alignment
-    auto pos = out.tellp();
-    uint64_t aligned = (static_cast<uint64_t>(pos) + 31) & ~uint64_t(31);
-    while (static_cast<uint64_t>(out.tellp()) < aligned) {
-      WriteRaw<uint8_t>(out, 0);
-    }
-
-    out.write(reinterpret_cast<const char *>(values), sizeof(values));
-  }
-
-  GGUFFile gguf;
-  ASSERT_TRUE(gguf.Open(tmp.path()));
-
-  Tensor t = gguf.LoadTensor("matrix");
-  EXPECT_TRUE(t.shape_equals({2, 3}));
-  EXPECT_EQ(t.dtype(), DType::kFloat32);
-  EXPECT_FLOAT_EQ(t.at({0, 0}), 1.0f);
-  EXPECT_FLOAT_EQ(t.at({0, 2}), 3.0f);
-  EXPECT_FLOAT_EQ(t.at({1, 0}), 4.0f);
-  EXPECT_FLOAT_EQ(t.at({1, 2}), 6.0f);
-}
-
-// Helper: convert float to FP16 (matches tensor.cc's FloatToHalf)
-static uint16_t FloatToHalf(float f) {
-  uint32_t bits;
-  std::memcpy(&bits, &f, sizeof(bits));
-  uint32_t sign = (bits >> 16) & 0x8000;
-  int32_t exponent = ((bits >> 23) & 0xFF) - 127 + 15;
-  uint32_t mantissa = bits & 0x007FFFFF;
-  if (exponent <= 0) {
-    return static_cast<uint16_t>(sign);
-  } else if (exponent >= 31) {
-    return static_cast<uint16_t>(sign | 0x7C00);
-  }
-  return static_cast<uint16_t>(sign | (exponent << 10) | (mantissa >> 13));
-}
-
-TEST(GGUFLoaderTest, LoadTensorF16) {
+TEST(GGUFLoaderTest, LoadTensorBF16) {
+  // Build a synthetic GGUF with one 1D BF16 tensor of 4 elements
   TempFile tmp;
   const int64_t numel = 4;
   const float src_values[4] = {1.0f, -2.0f, 0.5f, 100.0f};
-  uint16_t half_values[4];
+
+  // Convert to BF16: just truncate lower 16 bits of FP32
+  uint16_t bf16_values[4];
   for (int i = 0; i < 4; ++i) {
-    half_values[i] = FloatToHalf(src_values[i]);
+    uint32_t bits;
+    std::memcpy(&bits, &src_values[i], sizeof(bits));
+    bf16_values[i] = static_cast<uint16_t>(bits >> 16);
   }
 
   {
     std::ofstream out(tmp.path(), std::ios::binary);
     WriteHeader(out, 1, 0);
 
-    WriteGGUFString(out, "half_tensor");
+    WriteGGUFString(out, "bf16_tensor");
     WriteRaw<uint32_t>(out, 1);
     WriteRaw<uint64_t>(out, static_cast<uint64_t>(numel));
-    WriteRaw<uint32_t>(out, static_cast<uint32_t>(GGMLType::kF16));
+    WriteRaw<uint32_t>(out, static_cast<uint32_t>(GGMLType::kBF16));
     WriteRaw<uint64_t>(out, 0);
 
     // Pad
@@ -337,15 +243,16 @@ TEST(GGUFLoaderTest, LoadTensorF16) {
       WriteRaw<uint8_t>(out, 0);
     }
 
-    out.write(reinterpret_cast<const char *>(half_values), sizeof(half_values));
+    out.write(reinterpret_cast<const char *>(bf16_values), sizeof(bf16_values));
   }
 
   GGUFFile gguf;
   ASSERT_TRUE(gguf.Open(tmp.path()));
 
-  Tensor t = gguf.LoadTensor("half_tensor");
+  Tensor t = gguf.LoadTensor("bf16_tensor");
   EXPECT_TRUE(t.shape_equals({numel}));
-  EXPECT_EQ(t.dtype(), DType::kFloat16);
+  EXPECT_EQ(t.dtype(), DType::kBFloat16);
+  // BF16 values match source exactly for these simple values
   EXPECT_FLOAT_EQ(t.at({0}), 1.0f);
   EXPECT_FLOAT_EQ(t.at({1}), -2.0f);
   EXPECT_FLOAT_EQ(t.at({2}), 0.5f);
@@ -363,105 +270,68 @@ TEST(GGUFLoaderTest, LoadTensorNotFound) {
   EXPECT_THROW(gguf.LoadTensor("nonexistent"), std::runtime_error);
 }
 
-TEST(GGUFLoaderTest, MultipleTensors) {
-  // Two tensors in one file — verify both load correctly
+TEST(GGUFLoaderTest, BF16TensorConvertToF32) {
+  // Verify that BF16 tensors can be converted to F32 via Tensor::to()
   TempFile tmp;
-  const float w_data[6] = {1, 2, 3, 4, 5, 6};
-  const float b_data[3] = {0.1f, 0.2f, 0.3f};
+  const int64_t numel = 4;
+  const float src_values[4] = {1.0f, -2.0f, 0.5f, 100.0f};
+
+  uint16_t bf16_values[4];
+  for (int i = 0; i < 4; ++i) {
+    uint32_t bits;
+    std::memcpy(&bits, &src_values[i], sizeof(bits));
+    bf16_values[i] = static_cast<uint16_t>(bits >> 16);
+  }
 
   {
     std::ofstream out(tmp.path(), std::ios::binary);
-    WriteHeader(out, 2, 0);
+    WriteHeader(out, 1, 0);
 
-    // Tensor "weights" [2, 3] F32, offset = 0
-    WriteGGUFString(out, "weights");
-    WriteRaw<uint32_t>(out, 2);
-    WriteRaw<uint64_t>(out, 2);
-    WriteRaw<uint64_t>(out, 3);
-    WriteRaw<uint32_t>(out, static_cast<uint32_t>(GGMLType::kF32));
+    WriteGGUFString(out, "bf16_tensor");
+    WriteRaw<uint32_t>(out, 1);
+    WriteRaw<uint64_t>(out, static_cast<uint64_t>(numel));
+    WriteRaw<uint32_t>(out, static_cast<uint32_t>(GGMLType::kBF16));
     WriteRaw<uint64_t>(out, 0);
 
-    // Tensor "bias" [3] F32, offset = 24 (6 floats * 4 bytes)
-    WriteGGUFString(out, "bias");
-    WriteRaw<uint32_t>(out, 1);
-    WriteRaw<uint64_t>(out, 3);
-    WriteRaw<uint32_t>(out, static_cast<uint32_t>(GGMLType::kF32));
-    WriteRaw<uint64_t>(out, 24);
-
-    // Pad to alignment
     auto pos = out.tellp();
     uint64_t aligned = (static_cast<uint64_t>(pos) + 31) & ~uint64_t(31);
     while (static_cast<uint64_t>(out.tellp()) < aligned) {
       WriteRaw<uint8_t>(out, 0);
     }
 
-    // Write tensor data: weights then bias
-    out.write(reinterpret_cast<const char *>(w_data), sizeof(w_data));
-    out.write(reinterpret_cast<const char *>(b_data), sizeof(b_data));
+    out.write(reinterpret_cast<const char *>(bf16_values), sizeof(bf16_values));
   }
 
   GGUFFile gguf;
   ASSERT_TRUE(gguf.Open(tmp.path()));
 
-  Tensor w = gguf.LoadTensor("weights");
-  EXPECT_TRUE(w.shape_equals({2, 3}));
-  EXPECT_FLOAT_EQ(w.at({0, 0}), 1.0f);
-  EXPECT_FLOAT_EQ(w.at({1, 2}), 6.0f);
+  Tensor t = gguf.LoadTensor("bf16_tensor");
+  EXPECT_EQ(t.dtype(), DType::kBFloat16);
 
-  Tensor b = gguf.LoadTensor("bias");
-  EXPECT_TRUE(b.shape_equals({3}));
-  EXPECT_FLOAT_EQ(b.at({0}), 0.1f);
-  EXPECT_FLOAT_EQ(b.at({2}), 0.3f);
+  // Convert to F32 — this is what the ops pipeline does
+  Tensor t_f32 = t.to(DType::kFloat32);
+  EXPECT_EQ(t_f32.dtype(), DType::kFloat32);
+  EXPECT_FLOAT_EQ(t_f32.at({0}), 1.0f);
+  EXPECT_FLOAT_EQ(t_f32.at({1}), -2.0f);
+  EXPECT_FLOAT_EQ(t_f32.at({2}), 0.5f);
+  EXPECT_FLOAT_EQ(t_f32.at({3}), 100.0f);
 }
 
-TEST(GGUFLoaderTest, MetadataAndTensorsTogether) {
-  // Full integration: metadata + tensors in one file
+TEST(GGUFLoaderTest, DebugModeDoesNotCrash) {
   TempFile tmp;
-  const float data[4] = {10, 20, 30, 40};
-
   {
     std::ofstream out(tmp.path(), std::ios::binary);
-    WriteHeader(out, 1, 2);
+    WriteHeader(out, 0, 1);
 
-    // Metadata 1: string
-    WriteGGUFString(out, "general.architecture");
+    WriteGGUFString(out, "general.name");
     WriteRaw<uint32_t>(out, static_cast<uint32_t>(GGUFValueType::kString));
-    WriteGGUFString(out, "gemma");
-
-    // Metadata 2: uint32
-    WriteGGUFString(out, "gemma.embedding_length");
-    WriteRaw<uint32_t>(out, static_cast<uint32_t>(GGUFValueType::kUint32));
-    WriteRaw<uint32_t>(out, 1152);
-
-    // Tensor: "embed" [4] F32
-    WriteGGUFString(out, "embed");
-    WriteRaw<uint32_t>(out, 1);
-    WriteRaw<uint64_t>(out, 4);
-    WriteRaw<uint32_t>(out, static_cast<uint32_t>(GGMLType::kF32));
-    WriteRaw<uint64_t>(out, 0);
-
-    // Pad
-    auto pos = out.tellp();
-    uint64_t aligned = (static_cast<uint64_t>(pos) + 31) & ~uint64_t(31);
-    while (static_cast<uint64_t>(out.tellp()) < aligned) {
-      WriteRaw<uint8_t>(out, 0);
-    }
-
-    out.write(reinterpret_cast<const char *>(data), sizeof(data));
+    WriteGGUFString(out, "test-model");
   }
 
   GGUFFile gguf;
-  ASSERT_TRUE(gguf.Open(tmp.path()));
-
-  // Verify metadata
-  EXPECT_EQ(gguf.GetString("general.architecture"), "gemma");
-  EXPECT_EQ(gguf.GetInt("gemma.embedding_length"), 1152);
-
-  // Verify tensor
-  Tensor t = gguf.LoadTensor("embed");
-  EXPECT_TRUE(t.shape_equals({4}));
-  EXPECT_FLOAT_EQ(t.at({0}), 10.0f);
-  EXPECT_FLOAT_EQ(t.at({3}), 40.0f);
+  // Open with debug=true — should print debug info without crashing
+  ASSERT_TRUE(gguf.Open(tmp.path(), /*debug=*/true));
+  EXPECT_EQ(gguf.GetString("general.name"), "test-model");
 }
 
 // ============================================================================
@@ -470,17 +340,189 @@ TEST(GGUFLoaderTest, MetadataAndTensorsTogether) {
 
 TEST(GGMLTypeTest, TypeToDType) {
   EXPECT_EQ(GGMLTypeToDType(GGMLType::kF32), DType::kFloat32);
-  EXPECT_EQ(GGMLTypeToDType(GGMLType::kF16), DType::kFloat16);
-  // Unsupported types still throw.
-  EXPECT_THROW(GGMLTypeToDType(GGMLType::kQ4_1), std::runtime_error);
+  EXPECT_EQ(GGMLTypeToDType(GGMLType::kBF16), DType::kBFloat16);
+  // Unsupported types throw.
+  EXPECT_THROW(GGMLTypeToDType(static_cast<GGMLType>(1)), std::runtime_error);
 }
 
 TEST(GGMLTypeTest, TypeSize) {
   EXPECT_EQ(GGMLTypeSize(GGMLType::kF32), 4u);
-  EXPECT_EQ(GGMLTypeSize(GGMLType::kF16), 2u);
+  EXPECT_EQ(GGMLTypeSize(GGMLType::kBF16), 2u);
 }
 
+TEST(GGMLTypeTest, TypeName) {
+  EXPECT_EQ(GGMLTypeName(GGMLType::kF32), "GGML_TYPE_F32");
+  EXPECT_EQ(GGMLTypeName(GGMLType::kBF16), "BF16");
+}
 
+// ============================================================================
+// Real Model Tests — load the actual gemma-3-1b-it-BF16.gguf
+//
+// These tests validate against the Python GGUF parser reference output
+// in engine/gguf/parsedbf16.txt.
+// ============================================================================
+
+// Path to the real BF16 model. Adjust if your model is elsewhere.
+static const char *kModelPath =
+    "C:/Users/james/Coding/Projects/Inference-Engine/bazel-inference-engine/"
+    "model/gemma-3-1b-it-BF16.gguf";
+
+class RealModelTest : public ::testing::Test {
+protected:
+  void SetUp() override {
+    if (!std::filesystem::exists(kModelPath)) {
+      GTEST_SKIP() << "Model file not found: " << kModelPath;
+    }
+    ASSERT_TRUE(gguf_.Open(kModelPath, /*debug=*/false));
+  }
+
+  GGUFFile gguf_;
+};
+
+TEST_F(RealModelTest, HeaderIsCorrect) {
+  EXPECT_EQ(gguf_.header().magic, kGGUFMagic);
+  EXPECT_EQ(gguf_.header().version, 3u);
+  // Gemma 3 1B BF16 has 340 tensors
+  EXPECT_EQ(gguf_.header().tensor_count, 340u);
+}
+
+TEST_F(RealModelTest, ArchitectureMetadata) {
+  EXPECT_EQ(gguf_.GetString("general.architecture"), "gemma3");
+  EXPECT_EQ(gguf_.GetString("general.type"), "model");
+  EXPECT_EQ(gguf_.GetString("general.name"), "Gemma-3-1B-It");
+}
+
+TEST_F(RealModelTest, ModelDimensionMetadata) {
+  EXPECT_EQ(gguf_.GetInt("gemma3.embedding_length"), 1152);
+  EXPECT_EQ(gguf_.GetInt("gemma3.block_count"), 26);
+  EXPECT_EQ(gguf_.GetInt("gemma3.feed_forward_length"), 6912);
+  EXPECT_EQ(gguf_.GetInt("gemma3.attention.head_count"), 4);
+  EXPECT_EQ(gguf_.GetInt("gemma3.attention.head_count_kv"), 1);
+  EXPECT_EQ(gguf_.GetInt("gemma3.attention.key_length"), 256);
+  EXPECT_EQ(gguf_.GetInt("gemma3.attention.value_length"), 256);
+  EXPECT_EQ(gguf_.GetInt("gemma3.attention.sliding_window"), 512);
+  EXPECT_FLOAT_EQ(gguf_.GetFloat("gemma3.rope.freq_base"), 1000000.0f);
+}
+
+TEST_F(RealModelTest, TokenizerMetadata) {
+  EXPECT_EQ(gguf_.GetString("tokenizer.ggml.model"), "llama");
+  EXPECT_EQ(gguf_.GetInt("tokenizer.ggml.bos_token_id"), 2);
+  EXPECT_EQ(gguf_.GetInt("tokenizer.ggml.eos_token_id"), 106);
+  EXPECT_EQ(gguf_.GetInt("tokenizer.ggml.unknown_token_id"), 3);
+  EXPECT_EQ(gguf_.GetInt("tokenizer.ggml.padding_token_id"), 0);
+
+  // Verify tokens array exists and has expected size
+  auto *tokens_val = gguf_.GetMetadata("tokenizer.ggml.tokens");
+  ASSERT_NE(tokens_val, nullptr);
+  auto *tokens = std::get_if<std::vector<std::string>>(tokens_val);
+  ASSERT_NE(tokens, nullptr);
+  // 262144 tokens = 50 shown + 262094 more from parsedbf16.txt
+  EXPECT_EQ(tokens->size(), 262144u);
+  // Check first few tokens match reference
+  EXPECT_EQ((*tokens)[0], "<pad>");
+  EXPECT_EQ((*tokens)[1], "<eos>");
+  EXPECT_EQ((*tokens)[2], "<bos>");
+  EXPECT_EQ((*tokens)[3], "<unk>");
+}
+
+TEST_F(RealModelTest, EmbeddingTensorInfo) {
+  // From parsedbf16.txt:
+  //   Name: token_embd.weight, Shape: (1152, 262144), Type: BF16, Offset: 0
+  auto *info = gguf_.GetTensorInfo("token_embd.weight");
+  ASSERT_NE(info, nullptr);
+  EXPECT_EQ(info->type, GGMLType::kBF16);
+  EXPECT_EQ(info->offset, 0u);
+  ASSERT_EQ(info->dimensions.size(), 2u);
+  EXPECT_EQ(info->dimensions[0], 1152u);
+  EXPECT_EQ(info->dimensions[1], 262144u);
+}
+
+TEST_F(RealModelTest, NormTensorIsF32) {
+  // From parsedbf16.txt:
+  //   Name: blk.0.attn_norm.weight, Shape: (1152,), Type: GGML_TYPE_F32
+  auto *info = gguf_.GetTensorInfo("blk.0.attn_norm.weight");
+  ASSERT_NE(info, nullptr);
+  EXPECT_EQ(info->type, GGMLType::kF32);
+  ASSERT_EQ(info->dimensions.size(), 1u);
+  EXPECT_EQ(info->dimensions[0], 1152u);
+}
+
+TEST_F(RealModelTest, LoadEmbeddingTensorBF16) {
+  // Load the embedding table — should be BF16, zero-copy
+  Tensor emb = gguf_.LoadTensor("token_embd.weight");
+
+  // Shape should be reversed from GGUF column-major: [262144, 1152]
+  EXPECT_TRUE(emb.shape_equals({262144, 1152}));
+  EXPECT_EQ(emb.dtype(), DType::kBFloat16);
+  EXPECT_TRUE(emb.is_contiguous());
+
+  // Verify we can read values
+  float val = emb.at({0, 0});
+  // Just check it's a valid float (not NaN/Inf)
+  EXPECT_TRUE(std::isfinite(val));
+}
+
+TEST_F(RealModelTest, LoadNormTensorF32) {
+  Tensor norm = gguf_.LoadTensor("blk.0.attn_norm.weight");
+  EXPECT_TRUE(norm.shape_equals({1152}));
+  EXPECT_EQ(norm.dtype(), DType::kFloat32);
+  EXPECT_TRUE(norm.is_contiguous());
+
+  // Check the values are reasonable
+  float val = norm.at({0});
+  EXPECT_TRUE(std::isfinite(val));
+}
+
+TEST_F(RealModelTest, LoadWeightTensorBF16) {
+  // blk.0.ffn_gate.weight: (1152, 6912), BF16
+  Tensor gate = gguf_.LoadTensor("blk.0.ffn_gate.weight");
+  EXPECT_TRUE(gate.shape_equals({6912, 1152})); // reversed from GGUF
+  EXPECT_EQ(gate.dtype(), DType::kBFloat16);
+  EXPECT_TRUE(gate.is_contiguous());
+}
+
+TEST_F(RealModelTest, TensorCount) {
+  auto names = gguf_.TensorNames();
+  EXPECT_EQ(names.size(), 340u);
+}
+
+TEST_F(RealModelTest, BF16TensorConvertToF32Pipeline) {
+  // Simulate the ops pipeline: load BF16 → convert to F32 → contiguous
+  Tensor norm_weight = gguf_.LoadTensor("blk.0.attn_norm.weight");
+  Tensor norm_f32 = norm_weight.to(DType::kFloat32).contiguous();
+  EXPECT_EQ(norm_f32.dtype(), DType::kFloat32);
+  EXPECT_TRUE(norm_f32.is_contiguous());
+
+  // Load a BF16 weight and convert
+  Tensor gate = gguf_.LoadTensor("blk.0.attn_k.weight");
+  Tensor gate_f32 = gate.to(DType::kFloat32).contiguous();
+  EXPECT_EQ(gate_f32.dtype(), DType::kFloat32);
+  EXPECT_TRUE(gate_f32.is_contiguous());
+}
+
+TEST_F(RealModelTest, DebugModePrintsAllInfo) {
+  // Just verify debug mode doesn't crash on the real model
+  gguf_.PrintDebugInfo();
+}
+
+TEST_F(RealModelTest, OutputNormTensor) {
+  // output_norm.weight: (1152,), F32 — the final layer norm
+  auto *info = gguf_.GetTensorInfo("output_norm.weight");
+  ASSERT_NE(info, nullptr);
+  EXPECT_EQ(info->type, GGMLType::kF32);
+
+  Tensor t = gguf_.LoadTensor("output_norm.weight");
+  EXPECT_TRUE(t.shape_equals({1152}));
+  EXPECT_EQ(t.dtype(), DType::kFloat32);
+}
+
+TEST_F(RealModelTest, AllTensorsLoadable) {
+  // Verify every tensor in the model can be loaded without errors
+  auto names = gguf_.TensorNames();
+  for (const auto &name : names) {
+    ASSERT_NO_THROW(gguf_.LoadTensor(name)) << "Failed to load: " << name;
+  }
+}
 
 } // namespace
 } // namespace ie

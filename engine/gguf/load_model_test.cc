@@ -4,21 +4,32 @@
 #include <string>
 
 int main(int argc, char *argv[]) {
-  std::string model_path = "model/gemma-3-1b-it-f16.gguf";
-  if (argc > 1) {
-    model_path = argv[1];
+  std::string model_path =
+      "C:/Users/james/Coding/Projects/Inference-Engine/bazel-inference-engine/"
+      "model/gemma-3-1b-it-BF16.gguf";
+  bool debug = false;
+
+  for (int i = 1; i < argc; ++i) {
+    std::string arg = argv[i];
+    if (arg == "--debug" || arg == "-d") {
+      debug = true;
+    } else {
+      model_path = arg;
+    }
   }
 
   std::cout << "Loading GGUF file: " << model_path << std::endl;
 
   ie::GGUFFile gguf;
-  if (!gguf.Open(model_path)) {
+  if (!gguf.Open(model_path, debug)) {
     std::cerr << "Failed to open GGUF file!" << std::endl;
     return 1;
   }
 
-  // Print the file summary (metadata + first 10 tensors)
-  gguf.PrintSummary();
+  if (!debug) {
+    // Print the file summary if debug wasn't already printed
+    gguf.PrintSummary();
+  }
 
   // List all tensor names
   auto names = gguf.TensorNames();
@@ -36,10 +47,9 @@ int main(int argc, char *argv[]) {
       std::cout << "  is_contiguous: " << (t.is_contiguous() ? "yes" : "no")
                 << std::endl;
 
-      // Print first few values
+      // Print first few values (via .at() which handles BF16→F32 conversion)
       int64_t n = std::min(t.numel(), int64_t(8));
       std::cout << "  first " << n << " values: [";
-      // For multi-dim tensors, flatten to read first elements
       auto flat = t.view({t.numel()});
       if (flat.has_value()) {
         for (int64_t i = 0; i < n; ++i) {
@@ -75,6 +85,11 @@ int main(int argc, char *argv[]) {
           std::cout << emb.at({1, i}) << " ";
         }
         std::cout << std::endl;
+
+        // Demonstrate BF16→F32 conversion pipeline
+        std::cout << "\n  Converting BF16 embedding to F32..." << std::endl;
+        ie::Tensor emb_f32 = emb.to(ie::DType::kFloat32);
+        std::cout << "  " << emb_f32.to_string() << std::endl;
       }
     } catch (const std::exception &e) {
       std::cerr << "  Error: " << e.what() << std::endl;

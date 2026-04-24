@@ -248,9 +248,18 @@ bool InferenceEngine::BuildModel() {
             << "\n  hidden_dim:   " << config_.hidden_dim
             << "\n  vocab_size:   " << config_.vocab_size << std::endl;
 
-  Tensor token_embedding = gguf_.LoadTensor("token_embd.weight");
+  // Helper: load a 2D weight and transpose it to F32.
+  // Replaces the old LoadTensorTransposed — now done via the tensor system.
+  // BF16→F32 conversion happens in .to(kFloat32), transpose in .transpose().
+  auto loadTransposed = [&](const std::string &name) -> Tensor {
+    Tensor t = gguf_.LoadTensor(name);
+    return t.transpose(0, 1).to(DType::kFloat32).contiguous();
+  };
+
+  Tensor token_embedding = gguf_.LoadTensor("token_embd.weight")
+                                .to(DType::kFloat32).contiguous();
   // Pre-transpose embedding for logit projection: [vocab, embed] → [embed, vocab]
-  Tensor embed_t = gguf_.LoadTensorTransposed("token_embd.weight");
+  Tensor embed_t = loadTransposed("token_embd.weight");
 
   std::vector<TransformerBlock> layers;
   layers.reserve(config_.num_layers);
@@ -258,40 +267,31 @@ bool InferenceEngine::BuildModel() {
   for (int32_t i = 0; i < config_.num_layers; ++i) {
     std::string prefix = "blk." + std::to_string(i) + ".";
 
-    // Load weight matrices pre-transposed (fused load + F16→F32 + transpose).
-    // This avoids 8 intermediate allocations per layer.
-    Tensor wq_t = gguf_.LoadTensorTransposed(prefix + "attn_q.weight");
-    if (i == 0) {
-      Tensor check = wq_t;
-      std::cerr << "L0 wq_t.weight [0..4]: " << check.data<float>()[0] << ", " 
-                << check.data<float>()[1] << ", " << check.data<float>()[2] << ", "
-                << check.data<float>()[3] << ", " << check.data<float>()[4] << std::endl;
-    }
-    Tensor wk_t = gguf_.LoadTensorTransposed(prefix + "attn_k.weight");
-    Tensor wv_t = gguf_.LoadTensorTransposed(prefix + "attn_v.weight");
-    Tensor wo_t = gguf_.LoadTensorTransposed(prefix + "attn_output.weight");
+    // Load weight matrices: BF16 → transpose → F32 contiguous.
+    Tensor wq_t = loadTransposed(prefix + "attn_q.weight");
+    Tensor wk_t = loadTransposed(prefix + "attn_k.weight");
+    Tensor wv_t = loadTransposed(prefix + "attn_v.weight");
+    Tensor wo_t = loadTransposed(prefix + "attn_output.weight");
 
     Tensor q_norm_w;
     if (gguf_.GetTensorInfo(prefix + "attn_q_norm.weight")) {
-      q_norm_w = gguf_.LoadTensor(prefix + "attn_q_norm.weight");
-      if (i == 0) {
-        Tensor check = q_norm_w.to(DType::kFloat32);
-        std::cerr << "L0 q_norm.weight [0..4]: " << check.data<float>()[0] << ", " 
-                  << check.data<float>()[1] << ", " << check.data<float>()[2] << ", "
-                  << check.data<float>()[3] << ", " << check.data<float>()[4] << std::endl;
-      }
+      q_norm_w = gguf_.LoadTensor(prefix + "attn_q_norm.weight")
+                     .to(DType::kFloat32).contiguous();
     }
     Tensor k_norm_w;
     if (gguf_.GetTensorInfo(prefix + "attn_k_norm.weight")) {
-      k_norm_w = gguf_.LoadTensor(prefix + "attn_k_norm.weight");
+      k_norm_w = gguf_.LoadTensor(prefix + "attn_k_norm.weight")
+                     .to(DType::kFloat32).contiguous();
     }
 
-    Tensor gate_t = gguf_.LoadTensorTransposed(prefix + "ffn_gate.weight");
-    Tensor up_t = gguf_.LoadTensorTransposed(prefix + "ffn_up.weight");
-    Tensor down_t = gguf_.LoadTensorTransposed(prefix + "ffn_down.weight");
+    Tensor gate_t = loadTransposed(prefix + "ffn_gate.weight");
+    Tensor up_t = loadTransposed(prefix + "ffn_up.weight");
+    Tensor down_t = loadTransposed(prefix + "ffn_down.weight");
 
-    Tensor attn_norm_w = gguf_.LoadTensor(prefix + "attn_norm.weight");
-    Tensor ffn_norm_w = gguf_.LoadTensor(prefix + "ffn_norm.weight");
+    Tensor attn_norm_w = gguf_.LoadTensor(prefix + "attn_norm.weight")
+                             .to(DType::kFloat32).contiguous();
+    Tensor ffn_norm_w = gguf_.LoadTensor(prefix + "ffn_norm.weight")
+                            .to(DType::kFloat32).contiguous();
 
     RMSNorm attn_norm(std::move(attn_norm_w), config_.rms_norm_eps);
     Attention attn(config_, i, std::move(wq_t), std::move(wk_t),
@@ -306,7 +306,8 @@ bool InferenceEngine::BuildModel() {
     std::cout << "  Loaded block " << i << std::endl;
   }
 
-  Tensor final_norm_w = gguf_.LoadTensor("output_norm.weight");
+  Tensor final_norm_w = gguf_.LoadTensor("output_norm.weight")
+                            .to(DType::kFloat32).contiguous();
   RMSNorm final_norm(std::move(final_norm_w), config_.rms_norm_eps);
 
   model_ = std::make_unique<GemmaModel>(config_, std::move(token_embedding),
