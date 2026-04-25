@@ -8,6 +8,7 @@
 #include "engine/gguf/gguf_loader.h"
 #include "engine/model/config.h"
 #include "engine/model/layers.h"
+#include "engine/model/model_builder.h"
 #include "engine/tokenizer/tokenizer.h"
 
 namespace ie {
@@ -66,9 +67,6 @@ private:
 
   // Active sequence for single-request mode.
   int64_t seq_id_ = -1;
-
-  bool BuildModel();
-  bool BuildTokenizer();
 
   // --- Sampling ---
   int32_t Sample(const Tensor &logits, const SamplingConfig &config) const;

@@ -26,9 +26,10 @@ TEST(RMSNorm, BasicNormalization) {
   EXPECT_EQ(out.size(0), 1);
   EXPECT_EQ(out.size(1), 4);
 
+  // With (1+weight) formulation and weight=ones, weight factor is (1+1)=2.
   float rms = std::sqrt(6.25f);
-  EXPECT_NEAR(out.at({0, 0}), 3.0f / rms, 1e-4f);
-  EXPECT_NEAR(out.at({0, 1}), 4.0f / rms, 1e-4f);
+  EXPECT_NEAR(out.at({0, 0}), 3.0f / rms * 2.0f, 1e-4f);
+  EXPECT_NEAR(out.at({0, 1}), 4.0f / rms * 2.0f, 1e-4f);
   EXPECT_NEAR(out.at({0, 2}), 0.0f, 1e-4f);
   EXPECT_NEAR(out.at({0, 3}), 0.0f, 1e-4f);
 }
@@ -42,8 +43,10 @@ TEST(RMSNorm, WithWeightScaling) {
 
   Tensor out = norm.forward(x);
 
-  EXPECT_NEAR(out.at({0, 0}), 2.0f, 1e-4f);
-  EXPECT_NEAR(out.at({0, 1}), 0.5f, 1e-4f);
+  // With (1+weight), effective weights are (1+2.0)=3.0 and (1+0.5)=1.5.
+  // Input [1, 1] has RMS=1, so normalized = [1, 1], then * [3.0, 1.5].
+  EXPECT_NEAR(out.at({0, 0}), 3.0f, 1e-4f);
+  EXPECT_NEAR(out.at({0, 1}), 1.5f, 1e-4f);
 }
 
 // ============================================================================
@@ -81,7 +84,8 @@ TEST(TransformerBlock, SmallBlock) {
   config.num_layers = 1;
   config.max_seq_len = 64;
   config.rms_norm_eps = 1e-6f;
-  config.rope_theta = 10000.0f;
+  config.rope_theta_local = 10000.0f;
+  config.rope_theta_global = 1000000.0f;
 
   Tensor attn_norm_w = Tensor::ones({4});
   Tensor ffn_norm_w = Tensor::ones({4});
@@ -96,11 +100,15 @@ TEST(TransformerBlock, SmallBlock) {
 
   RMSNorm attn_norm(attn_norm_w, config.rms_norm_eps);
   Attention attn(config, /*layer_idx=*/0, wq_t, wk_t, wv_t, wo_t);
+  RMSNorm post_attn_norm(Tensor::zeros({4}), config.rms_norm_eps);
   RMSNorm ffn_norm(ffn_norm_w, config.rms_norm_eps);
   FeedForward ffn(gate_t, up_t, down_t);
+  RMSNorm post_ffn_norm(Tensor::zeros({4}), config.rms_norm_eps);
 
   TransformerBlock block(config, /*layer_idx=*/0, std::move(attn_norm),
-                         std::move(attn), std::move(ffn_norm), std::move(ffn));
+                         std::move(attn), std::move(post_attn_norm),
+                         std::move(ffn_norm), std::move(ffn),
+                         std::move(post_ffn_norm));
 
   // Create external KV cache.
   KVCacheManager kv_cache(/*num_layers=*/1, /*num_kv_heads=*/1,

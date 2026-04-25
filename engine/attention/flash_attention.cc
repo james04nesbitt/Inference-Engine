@@ -209,16 +209,17 @@ Tensor flash_attention_rope(const Tensor &query, const Tensor &key,
                                                   static_cast<float>(head_dim));
   }
 
-  // Helper: apply RoPE to a single [head_dim] vector in-place.
+  // Helper: apply RoPE (rotate_half style) to a single [head_dim] vector in-place.
   auto apply_rope = [&](float *vec, float pos) {
     for (int64_t i = 0; i < half_dim; ++i) {
       float theta = pos * inv_freq[i];
       float cos_t = std::cos(theta);
       float sin_t = std::sin(theta);
-      float x0 = vec[2 * i];
-      float x1 = vec[2 * i + 1];
-      vec[2 * i] = x0 * cos_t - x1 * sin_t;
-      vec[2 * i + 1] = x0 * sin_t + x1 * cos_t;
+      // rotate_half: pair (i, i + half_dim)
+      float x_first = vec[i];
+      float x_second = vec[i + half_dim];
+      vec[i] = x_first * cos_t - x_second * sin_t;
+      vec[i + half_dim] = x_second * cos_t + x_first * sin_t;
     }
   };
 

@@ -141,8 +141,16 @@ Tensor rms_norm(const Tensor &x, const Tensor &weight, float eps) {
 
   const int64_t n_rows = x_f.numel() / last_dim;
 
+  // Gemma 3 uses (1 + weight) instead of plain weight.
+  // The GGUF norm weights are zero-initialized, so (1 + 0) = identity.
+  // We create a shifted weight buffer: w_shifted[i] = 1.0 + w[i].
+  std::vector<float> w_shifted(last_dim);
+  for (int64_t i = 0; i < last_dim; ++i) {
+    w_shifted[i] = 1.0f + w_data[i];
+  }
+
   for (int64_t row = 0; row < n_rows; ++row) {
-    compute::SimdRmsNorm(x_data + row * last_dim, w_data,
+    compute::SimdRmsNorm(x_data + row * last_dim, w_shifted.data(),
                          o_data + row * last_dim, last_dim, eps);
   }
   return out.to(out_dtype);
@@ -295,6 +303,21 @@ Tensor rope(const Tensor &x, const Tensor &positions, float freq_base) {
   const float *pos_data = pos_f.data<float>();
   float *o_data = out.data<float>();
 
+  // Gemma 3 uses rotate_half RoPE (split first/second half of head_dim),
+  // NOT the interleaved variant (pairs at 2i, 2i+1).
+  //
+  // rotate_half(x): first_half = x[..., :half], second_half = x[..., half:]
+  //   result = cat(-second_half, first_half)
+  //
+  // apply_rotary: x * cos + rotate_half(x) * sin
+  //   x[i]          = x[i]          * cos[i] - x[i + half] * sin[i]
+  //   x[i + half]   = x[i + half]   * cos[i] + x[i]        * sin[i]
+  //
+  // inv_freq[i] = 1 / (base ^ (2i / head_dim)), i in [0, half_dim)
+  // cos/sin are computed as cos/sin(pos * inv_freq[i]) and then
+  // concatenated: [cos_0..cos_{half-1}, cos_0..cos_{half-1}]
+  // so cos[i] == cos[i + half_dim].
+
   std::vector<float> inv_freq(half_dim);
   for (int64_t i = 0; i < half_dim; ++i) {
     inv_freq[i] = 1.0f / std::pow(freq_base, static_cast<float>(2 * i) /
@@ -313,11 +336,12 @@ Tensor rope(const Tensor &x, const Tensor &positions, float freq_base) {
           float cos_theta = std::cos(theta);
           float sin_theta = std::sin(theta);
 
-          float x0 = x_data[offset + 2 * i];
-          float x1 = x_data[offset + 2 * i + 1];
+          // rotate_half style: pair (i, i + half_dim)
+          float x_first = x_data[offset + i];
+          float x_second = x_data[offset + i + half_dim];
 
-          o_data[offset + 2 * i] = x0 * cos_theta - x1 * sin_theta;
-          o_data[offset + 2 * i + 1] = x0 * sin_theta + x1 * cos_theta;
+          o_data[offset + i] = x_first * cos_theta - x_second * sin_theta;
+          o_data[offset + i + half_dim] = x_second * cos_theta + x_first * sin_theta;
         }
       }
     }

@@ -9,9 +9,9 @@
 #include <random>
 #include <stdexcept>
 
+#include "engine/model/model_builder.h"
 #include "engine/ops/ops.h"
 #include "engine/scheduler/batch_scheduler.h"
-#include "engine/tokenizer/bpe_tokenizer.h"
 
 namespace ie {
 
@@ -25,12 +25,20 @@ bool InferenceEngine::LoadModel(const std::string &model_path) {
 
   gguf_.PrintSummary();
 
-  if (!BuildTokenizer()) {
+  // Build tokenizer from GGUF metadata.
+  tokenizer_ = ie::BuildTokenizer(gguf_);
+  if (!tokenizer_) {
     std::cerr << "Warning: Failed to build tokenizer" << std::endl;
   }
 
-  if (!BuildModel()) {
-    std::cerr << "Warning: Failed to build model" << std::endl;
+  // Build model, config, and KV cache from GGUF tensors.
+  try {
+    ModelBundle bundle = ie::BuildGemmaModel(gguf_);
+    config_ = std::move(bundle.config);
+    model_ = std::move(bundle.model);
+    kv_cache_ = std::move(bundle.kv_cache);
+  } catch (const std::exception &e) {
+    std::cerr << "Warning: Failed to build model: " << e.what() << std::endl;
   }
 
   std::cout << "\nModel loaded successfully!" << std::endl;
@@ -65,13 +73,15 @@ std::string InferenceEngine::GenerateStreaming(
   }
   seq_id_ = kv_cache_->AllocateSequence();
 
-  // Step 1: Tokenize and prepend BOS.
-  std::vector<int32_t> tokens = tokenizer_->Encode(prompt);
+  // Step 1: Apply chat template and tokenize, then prepend BOS.
+  std::string formatted_prompt = ApplyGemma3ChatTemplate(prompt);
+  std::vector<int32_t> tokens = tokenizer_->Encode(formatted_prompt);
   tokens.insert(tokens.begin(), tokenizer_->BosId());
   int32_t prompt_len = static_cast<int32_t>(tokens.size());
 
   std::cerr << "Input tokens: [";
-  for (int32_t t : tokens) std::cerr << t << ", ";
+  for (int32_t t : tokens)
+    std::cerr << t << ", ";
   std::cerr << "]\n";
 
   // Step 2: Prefill.
@@ -201,176 +211,8 @@ int32_t InferenceEngine::Sample(const Tensor &logits,
   }
 }
 
-bool InferenceEngine::BuildModel() {
-  // Read model architecture name to determine key prefix.
-  // Gemma 3 GGUFs use "gemma3." prefix; some older ones use "gemma.".
-  std::string arch = gguf_.GetString("general.architecture", "gemma3");
-
-  auto getInt = [&](const std::string &suffix, int64_t def) -> int64_t {
-    int64_t val = gguf_.GetInt(arch + "." + suffix, -1);
-    if (val != -1) return val;
-    return gguf_.GetInt("gemma." + suffix, def);
-  };
-  auto getFloat = [&](const std::string &suffix, float def) -> float {
-    float val = gguf_.GetFloat(arch + "." + suffix, -1.0f);
-    if (val != -1.0f) return val;
-    return gguf_.GetFloat("gemma." + suffix, def);
-  };
-
-  config_.num_layers =
-      static_cast<int32_t>(getInt("block_count", 26));
-  config_.embed_dim =
-      static_cast<int32_t>(getInt("embedding_length", 1152));
-  config_.num_heads =
-      static_cast<int32_t>(getInt("attention.head_count", 4));
-  config_.num_kv_heads =
-      static_cast<int32_t>(getInt("attention.head_count_kv", 1));
-  config_.head_dim =
-      static_cast<int32_t>(getInt("attention.key_length", 256));
-  config_.hidden_dim =
-      static_cast<int32_t>(getInt("feed_forward_length", 6912));
-  config_.vocab_size =
-      static_cast<int32_t>(getInt("vocab_size", 262144));
-  config_.rms_norm_eps =
-      getFloat("attention.layer_norm_rms_epsilon", 1e-6f);
-  config_.rope_theta_global =
-      gguf_.GetFloat(arch + ".rope.freq_base", gguf_.GetFloat("gemma.rope.freq_base", 1e6f));
-  config_.rope_theta_local = 10000.0f;
-  config_.sliding_window =
-      static_cast<int32_t>(getInt("attention.sliding_window", 512));
-
-  std::cout << "\nModel config:"
-            << "\n  layers:       " << config_.num_layers
-            << "\n  embed_dim:    " << config_.embed_dim
-            << "\n  num_heads:    " << config_.num_heads
-            << "\n  num_kv_heads: " << config_.num_kv_heads
-            << "\n  head_dim:     " << config_.head_dim
-            << "\n  hidden_dim:   " << config_.hidden_dim
-            << "\n  vocab_size:   " << config_.vocab_size << std::endl;
-
-  // Helper: load a 2D weight and transpose it to F32.
-  // Replaces the old LoadTensorTransposed — now done via the tensor system.
-  // BF16→F32 conversion happens in .to(kFloat32), transpose in .transpose().
-  auto loadTransposed = [&](const std::string &name) -> Tensor {
-    Tensor t = gguf_.LoadTensor(name);
-    return t.transpose(0, 1).to(DType::kFloat32).contiguous();
-  };
-
-  Tensor token_embedding = gguf_.LoadTensor("token_embd.weight")
-                                .to(DType::kFloat32).contiguous();
-  // Pre-transpose embedding for logit projection: [vocab, embed] → [embed, vocab]
-  Tensor embed_t = loadTransposed("token_embd.weight");
-
-  std::vector<TransformerBlock> layers;
-  layers.reserve(config_.num_layers);
-
-  for (int32_t i = 0; i < config_.num_layers; ++i) {
-    std::string prefix = "blk." + std::to_string(i) + ".";
-
-    // Load weight matrices: BF16 → transpose → F32 contiguous.
-    Tensor wq_t = loadTransposed(prefix + "attn_q.weight");
-    Tensor wk_t = loadTransposed(prefix + "attn_k.weight");
-    Tensor wv_t = loadTransposed(prefix + "attn_v.weight");
-    Tensor wo_t = loadTransposed(prefix + "attn_output.weight");
-
-    Tensor q_norm_w;
-    if (gguf_.GetTensorInfo(prefix + "attn_q_norm.weight")) {
-      q_norm_w = gguf_.LoadTensor(prefix + "attn_q_norm.weight")
-                     .to(DType::kFloat32).contiguous();
-    }
-    Tensor k_norm_w;
-    if (gguf_.GetTensorInfo(prefix + "attn_k_norm.weight")) {
-      k_norm_w = gguf_.LoadTensor(prefix + "attn_k_norm.weight")
-                     .to(DType::kFloat32).contiguous();
-    }
-
-    Tensor gate_t = loadTransposed(prefix + "ffn_gate.weight");
-    Tensor up_t = loadTransposed(prefix + "ffn_up.weight");
-    Tensor down_t = loadTransposed(prefix + "ffn_down.weight");
-
-    Tensor attn_norm_w = gguf_.LoadTensor(prefix + "attn_norm.weight")
-                             .to(DType::kFloat32).contiguous();
-    Tensor ffn_norm_w = gguf_.LoadTensor(prefix + "ffn_norm.weight")
-                            .to(DType::kFloat32).contiguous();
-
-    RMSNorm attn_norm(std::move(attn_norm_w), config_.rms_norm_eps);
-    Attention attn(config_, i, std::move(wq_t), std::move(wk_t),
-                   std::move(wv_t), std::move(wo_t),
-                   std::move(q_norm_w), std::move(k_norm_w));
-    RMSNorm ffn_norm(std::move(ffn_norm_w), config_.rms_norm_eps);
-    FeedForward ffn(std::move(gate_t), std::move(up_t), std::move(down_t));
-
-    layers.emplace_back(config_, i, std::move(attn_norm), std::move(attn),
-                        std::move(ffn_norm), std::move(ffn));
-
-    std::cout << "  Loaded block " << i << std::endl;
-  }
-
-  Tensor final_norm_w = gguf_.LoadTensor("output_norm.weight")
-                            .to(DType::kFloat32).contiguous();
-  RMSNorm final_norm(std::move(final_norm_w), config_.rms_norm_eps);
-
-  model_ = std::make_unique<GemmaModel>(config_, std::move(token_embedding),
-                                        std::move(layers),
-                                        std::move(final_norm),
-                                        std::move(embed_t));
-
-  // Create the paged KV cache.
-  int32_t blocks_per_seq =
-      (config_.max_seq_len + kDefaultBlockSize - 1) / kDefaultBlockSize;
-  // Allocate enough blocks for a few concurrent sequences.
-  int32_t max_blocks =
-      blocks_per_seq * config_.num_layers * 4 + config_.num_layers;
-
-  kv_cache_ = std::make_unique<KVCacheManager>(
-      config_.num_layers, config_.num_kv_heads, config_.head_dim, max_blocks,
-      kDefaultBlockSize);
-
-  std::cout << "Model built successfully (" << config_.num_layers << " layers, "
-            << max_blocks << " KV cache blocks)" << std::endl;
-  return true;
-}
-
-bool InferenceEngine::BuildTokenizer() {
-  auto *tokens_val = gguf_.GetMetadata("tokenizer.ggml.tokens");
-  if (!tokens_val) {
-    std::cerr << "BuildTokenizer: missing tokenizer.ggml.tokens" << std::endl;
-    return false;
-  }
-  auto *vocab = std::get_if<std::vector<std::string>>(tokens_val);
-  if (!vocab) {
-    std::cerr << "BuildTokenizer: tokenizer.ggml.tokens is not a string array"
-              << std::endl;
-    return false;
-  }
-
-  auto *scores_val = gguf_.GetMetadata("tokenizer.ggml.scores");
-  if (!scores_val) {
-    std::cerr << "BuildTokenizer: missing tokenizer.ggml.scores" << std::endl;
-    return false;
-  }
-  auto *scores = std::get_if<std::vector<float>>(scores_val);
-  if (!scores) {
-    std::cerr << "BuildTokenizer: tokenizer.ggml.scores is not a float array"
-              << std::endl;
-    return false;
-  }
-
-  int32_t bos_id =
-      static_cast<int32_t>(gguf_.GetInt("tokenizer.ggml.bos_token_id", 2));
-  int32_t eos_id =
-      static_cast<int32_t>(gguf_.GetInt("tokenizer.ggml.eos_token_id", 1));
-  int32_t pad_id =
-      static_cast<int32_t>(gguf_.GetInt("tokenizer.ggml.padding_token_id", 0));
-
-  tokenizer_ =
-      std::make_unique<BPETokenizer>(*vocab, *scores, bos_id, eos_id, pad_id);
-
-  std::cout << "Tokenizer built: " << tokenizer_->VocabSize() << " tokens"
-            << ", BOS=" << bos_id << ", EOS=" << eos_id << ", PAD=" << pad_id
-            << std::endl;
-  return true;
-}
+// BuildModel() and BuildTokenizer() have been moved to
+// engine/model/model_builder.{h,cc} as standalone functions.
 
 // ============================================================================
 // Sampling Strategies

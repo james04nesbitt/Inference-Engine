@@ -2,16 +2,22 @@ load("@rules_cc//cc:defs.bzl", "cc_library", "cc_test")
 
 cc_library(
     name = "model",
-    srcs = ["layers.cc"],
+    srcs = [
+        "layers.cc",
+        "model_builder.cc",
+    ],
     hdrs = [
         "config.h",
         "layers.h",
+        "model_builder.h",
     ],
     visibility = ["//visibility:public"],
     deps = [
         "//engine/attention",
+        "//engine/gguf",
         "//engine/ops",
         "//engine/tensor",
+        "//engine/tokenizer",
     ],
 )
 

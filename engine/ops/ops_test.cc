@@ -148,11 +148,12 @@ TEST(OpsTest, RmsNormBasic) {
   Tensor w = Tensor::ones({4});
   Tensor out = rms_norm(x, w);
 
+  // With (1+weight) formulation: weight=ones means effective weight = 2.0
   float rms = std::sqrt((1 + 4 + 9 + 16) / 4.0f + 1e-6f);
-  EXPECT_NEAR(out.at({0}), 1.0f / rms, 1e-4f);
-  EXPECT_NEAR(out.at({1}), 2.0f / rms, 1e-4f);
-  EXPECT_NEAR(out.at({2}), 3.0f / rms, 1e-4f);
-  EXPECT_NEAR(out.at({3}), 4.0f / rms, 1e-4f);
+  EXPECT_NEAR(out.at({0}), 2.0f * 1.0f / rms, 1e-4f);
+  EXPECT_NEAR(out.at({1}), 2.0f * 2.0f / rms, 1e-4f);
+  EXPECT_NEAR(out.at({2}), 2.0f * 3.0f / rms, 1e-4f);
+  EXPECT_NEAR(out.at({3}), 2.0f * 4.0f / rms, 1e-4f);
 }
 
 TEST(OpsTest, RmsNormWithWeight) {
@@ -162,9 +163,10 @@ TEST(OpsTest, RmsNormWithWeight) {
 
   // rms = sqrt(mean([4, 4]) + 1e-6) = sqrt(4 + 1e-6) ≈ 2.0
   // normalized x ≈ [1, 1]
-  // output ≈ [3.0, 0.5]
-  EXPECT_NEAR(out.at({0}), 3.0f, 1e-4f);
-  EXPECT_NEAR(out.at({1}), 0.5f, 1e-4f);
+  // With (1+weight): effective weights are (1+3.0)=4.0, (1+0.5)=1.5
+  // output ≈ [4.0, 1.5]
+  EXPECT_NEAR(out.at({0}), 4.0f, 1e-4f);
+  EXPECT_NEAR(out.at({1}), 1.5f, 1e-4f);
 }
 
 TEST(OpsTest, RmsNorm2D) {
@@ -181,10 +183,10 @@ TEST(OpsTest, RmsNorm2D) {
   Tensor out = rms_norm(x, w);
   EXPECT_TRUE(out.shape_equals({2, 3}));
 
-  // Row 0: rms = sqrt(1 + 1e-6) ≈ 1.0, output ≈ [1, 1, 1]
-  EXPECT_NEAR(out.at({0, 0}), 1.0f, 1e-4f);
-  // Row 1: rms = sqrt(9 + 1e-6) ≈ 3.0, output ≈ [1, 1, 1]
-  EXPECT_NEAR(out.at({1, 0}), 1.0f, 1e-4f);
+  // Row 0: rms = sqrt(1 + 1e-6) ≈ 1.0, with (1+1)=2 weight, output ≈ [2, 2, 2]
+  EXPECT_NEAR(out.at({0, 0}), 2.0f, 1e-4f);
+  // Row 1: rms = sqrt(9 + 1e-6) ≈ 3.0, with (1+1)=2 weight, output ≈ [2, 2, 2]
+  EXPECT_NEAR(out.at({1, 0}), 2.0f, 1e-4f);
 }
 
 TEST(OpsTest, RmsNormWeightMismatchThrows) {
@@ -523,9 +525,9 @@ TEST(OpsTest, RmsNormFloat16) {
 
   Tensor out = rms_norm(x, w);
   EXPECT_EQ(out.dtype(), DType::kFloat16);
-  // rms = sqrt(4 + 1e-6) ≈ 2.0, output ≈ [1, 1]
-  EXPECT_NEAR(out.at({0}), 1.0f, 0.01f);
-  EXPECT_NEAR(out.at({1}), 1.0f, 0.01f);
+  // rms = sqrt(4 + 1e-6) ≈ 2.0, with (1+1)=2 weight, output ≈ [2, 2]
+  EXPECT_NEAR(out.at({0}), 2.0f, 0.01f);
+  EXPECT_NEAR(out.at({1}), 2.0f, 0.01f);
 }
 
 TEST(OpsTest, EmbeddingFloat16Table) {

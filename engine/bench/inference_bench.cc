@@ -65,14 +65,17 @@ static ie::GemmaModel BuildSyntheticModel(const ie::GemmaConfig &config) {
     ie::Tensor down_t = RandomTensor({config.hidden_dim, config.embed_dim});
     ie::FeedForward ffn(std::move(gate_t), std::move(up_t), std::move(down_t));
 
-    // Layer norms.
+    // Layer norms (zeros for post-norms matches GGUF convention: (1+0)=identity).
     ie::Tensor attn_norm_w = ie::Tensor::ones({config.embed_dim});
     ie::Tensor ffn_norm_w = ie::Tensor::ones({config.embed_dim});
     ie::RMSNorm attn_norm(std::move(attn_norm_w), config.rms_norm_eps);
+    ie::RMSNorm post_attn_norm(ie::Tensor::zeros({config.embed_dim}), config.rms_norm_eps);
     ie::RMSNorm ffn_norm(std::move(ffn_norm_w), config.rms_norm_eps);
+    ie::RMSNorm post_ffn_norm(ie::Tensor::zeros({config.embed_dim}), config.rms_norm_eps);
 
     layers.emplace_back(config, i, std::move(attn_norm), std::move(attn),
-                        std::move(ffn_norm), std::move(ffn));
+                        std::move(post_attn_norm), std::move(ffn_norm),
+                        std::move(ffn), std::move(post_ffn_norm));
   }
 
   // Final norm.

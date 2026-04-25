@@ -37,7 +37,8 @@ protected:
     config.vocab_size = kVocabSize;
     config.max_seq_len = 64;
     config.rms_norm_eps = 1e-6f;
-    config.rope_theta = 10000.0f;
+    config.rope_theta_local = 10000.0f;
+    config.rope_theta_global = 1000000.0f;
     return config;
   }
 
@@ -49,23 +50,33 @@ protected:
     std::vector<TransformerBlock> layers;
     for (int32_t i = 0; i < kNumLayers; ++i) {
       RMSNorm attn_norm(Tensor::ones({kEmbedDim}), config.rms_norm_eps);
-      Attention attn(config, i, Tensor::full({kHeadDim, kEmbedDim}, 0.1f),
-                     Tensor::full({kHeadDim, kEmbedDim}, 0.1f),
-                     Tensor::full({kHeadDim, kEmbedDim}, 0.1f),
-                     Tensor::full({kEmbedDim, kHeadDim}, 0.1f));
+      // Pre-transposed weights: [in, out] layout for matmul(x, W)
+      // Q/K/V projections: input=embed_dim, output varies
+      Attention attn(config, i,
+                     Tensor::full({kEmbedDim, static_cast<int64_t>(kNumHeads * kHeadDim)}, 0.1f),  // wq_t [embed, q_dim]
+                     Tensor::full({kEmbedDim, static_cast<int64_t>(kNumKvHeads * kHeadDim)}, 0.1f), // wk_t [embed, kv_dim]
+                     Tensor::full({kEmbedDim, static_cast<int64_t>(kNumKvHeads * kHeadDim)}, 0.1f), // wv_t [embed, kv_dim]
+                     Tensor::full({static_cast<int64_t>(kNumHeads * kHeadDim), kEmbedDim}, 0.1f));  // wo_t [q_dim, embed]
+      RMSNorm post_attn_norm(Tensor::zeros({kEmbedDim}), config.rms_norm_eps);
       RMSNorm ffn_norm(Tensor::ones({kEmbedDim}), config.rms_norm_eps);
-      FeedForward ffn(Tensor::full({kHiddenDim, kEmbedDim}, 0.1f),
-                      Tensor::full({kHiddenDim, kEmbedDim}, 0.1f),
-                      Tensor::full({kEmbedDim, kHiddenDim}, 0.1f));
+      // FFN weights: gate/up [embed, hidden], down [hidden, embed]
+      FeedForward ffn(Tensor::full({kEmbedDim, kHiddenDim}, 0.1f),
+                      Tensor::full({kEmbedDim, kHiddenDim}, 0.1f),
+                      Tensor::full({kHiddenDim, kEmbedDim}, 0.1f));
+      RMSNorm post_ffn_norm(Tensor::zeros({kEmbedDim}), config.rms_norm_eps);
 
       layers.emplace_back(config, i, std::move(attn_norm), std::move(attn),
-                          std::move(ffn_norm), std::move(ffn));
+                          std::move(post_attn_norm), std::move(ffn_norm),
+                          std::move(ffn), std::move(post_ffn_norm));
     }
 
     RMSNorm final_norm(Tensor::ones({kEmbedDim}), config.rms_norm_eps);
+    // Create a transposed embedding for logit projection.
+    Tensor embed_t = token_embedding.transpose(0, 1).contiguous();
     return std::make_unique<GemmaModel>(config, std::move(token_embedding),
                                         std::move(layers),
-                                        std::move(final_norm));
+                                        std::move(final_norm),
+                                        std::move(embed_t));
   }
 
   std::unique_ptr<BPETokenizer> MakeTokenizer() {

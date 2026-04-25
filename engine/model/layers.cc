@@ -183,11 +183,21 @@ Tensor Attention::forward(const Tensor &x, int32_t start_pos,
 Tensor TransformerBlock::forward(const Tensor &x, int32_t start_pos,
                                  KVCacheManager &kv_cache,
                                  int64_t seq_id) const {
+  // Gemma 3 uses 4 RMSNorm layers per block:
+  //   1. attn_norm_      (input_layernorm)            — pre-attention
+  //   2. post_attn_norm_ (post_attention_layernorm)    — post-attention, before residual
+  //   3. ffn_norm_       (pre_feedforward_layernorm)   — pre-FFN
+  //   4. post_ffn_norm_  (post_feedforward_layernorm)  — post-FFN, before residual
+
+  // Attention sub-block
   Tensor attn_out =
       attn_.forward(attn_norm_.forward(x), start_pos, kv_cache, seq_id);
+  attn_out = post_attn_norm_.forward(attn_out);
   Tensor residual1 = ops::add(x, attn_out);
 
+  // FFN sub-block
   Tensor ffn_out = ffn_.forward(ffn_norm_.forward(residual1));
+  ffn_out = post_ffn_norm_.forward(ffn_out);
   return ops::add(residual1, ffn_out);
 }
 
