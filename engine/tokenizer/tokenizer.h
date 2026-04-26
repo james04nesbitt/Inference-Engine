@@ -26,6 +26,10 @@ class Tokenizer {
   // Get the vocabulary size.
   virtual int32_t VocabSize() const = 0;
 
+  // Look up a token ID by its string representation.
+  // Returns -1 if the token is not in the vocabulary.
+  virtual int32_t TokenToId(const std::string& token) const { return -1; }
+
   // Special token IDs
   virtual int32_t BosId() const = 0;  // Beginning of sequence
   virtual int32_t EosId() const = 0;  // End of sequence

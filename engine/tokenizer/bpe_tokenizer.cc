@@ -1,5 +1,6 @@
 #include "engine/tokenizer/bpe_tokenizer.h"
 
+#include <cstdio>
 #include <limits>
 
 namespace ie {
@@ -118,7 +119,19 @@ std::string BPETokenizer::Decode(const std::vector<int32_t> &tokens) const {
   std::string result;
   for (int32_t id : tokens) {
     if (id >= 0 && id < static_cast<int32_t>(vocab_.size())) {
-      result += vocab_[id];
+      const std::string &text = vocab_[id];
+      // Detect byte-fallback tokens: <0xXX> (6 chars: '<','0','x',H,H,'>')
+      if (text.size() == 6 && text[0] == '<' && text[1] == '0' &&
+          text[2] == 'x' && text[5] == '>') {
+        unsigned int byte_val = 0;
+        if (std::sscanf(text.c_str(), "<0x%02X>", &byte_val) == 1) {
+          result += static_cast<char>(byte_val);
+        } else {
+          result += text;
+        }
+      } else {
+        result += text;
+      }
     }
   }
 

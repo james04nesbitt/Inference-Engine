@@ -37,6 +37,9 @@ class BPETokenizer : public Tokenizer {
   int32_t VocabSize() const override {
     return static_cast<int32_t>(vocab_.size());
   }
+  int32_t TokenToId(const std::string& token) const override {
+    return LookupToken(token);
+  }
   int32_t BosId() const override { return bos_id_; }
   int32_t EosId() const override { return eos_id_; }
   int32_t PadId() const override { return pad_id_; }

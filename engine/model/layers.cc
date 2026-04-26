@@ -19,7 +19,7 @@ Tensor RMSNorm::forward(const Tensor &x) const {
 // FeedForward::forward — GeGLU (used in Gemma models)
 // ============================================================================
 Tensor FeedForward::forward(const Tensor &x) const {
-  Tensor gate = ops::silu(ops::matmul(x, gate_t_));
+  Tensor gate = ops::gelu(ops::matmul(x, gate_t_));
   Tensor up = ops::matmul(x, up_t_);
   return ops::matmul(ops::mul(gate, up), down_t_);
 }

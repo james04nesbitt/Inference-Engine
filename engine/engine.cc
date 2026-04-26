@@ -73,10 +73,36 @@ std::string InferenceEngine::GenerateStreaming(
   }
   seq_id_ = kv_cache_->AllocateSequence();
 
-  // Step 1: Apply chat template and tokenize, then prepend BOS.
-  std::string formatted_prompt = ApplyGemma3ChatTemplate(prompt);
-  std::vector<int32_t> tokens = tokenizer_->Encode(formatted_prompt);
-  tokens.insert(tokens.begin(), tokenizer_->BosId());
+  // Step 1: Build token sequence with proper special token injection.
+  // Instead of encoding the chat template string through BPE (which shreds
+  // control tokens like <start_of_turn> into sub-pieces), we inject the
+  // special token IDs directly and only BPE-encode the user text.
+  int32_t start_of_turn_id = tokenizer_->TokenToId("<start_of_turn>");
+  int32_t end_of_turn_id = tokenizer_->TokenToId("<end_of_turn>");
+  if (start_of_turn_id < 0 || end_of_turn_id < 0) {
+    throw std::runtime_error(
+        "Could not find <start_of_turn>/<end_of_turn> in vocab. "
+        "start_of_turn=" + std::to_string(start_of_turn_id) +
+        " end_of_turn=" + std::to_string(end_of_turn_id));
+  }
+
+  std::vector<int32_t> tokens;
+  tokens.push_back(tokenizer_->BosId());             // BOS
+  tokens.push_back(start_of_turn_id);                // <start_of_turn>
+  {
+    auto user_tokens = tokenizer_->Encode("user\n" + prompt);
+    tokens.insert(tokens.end(), user_tokens.begin(), user_tokens.end());
+  }
+  tokens.push_back(end_of_turn_id);                  // <end_of_turn>
+  {
+    auto newline_tokens = tokenizer_->Encode("\n");
+    tokens.insert(tokens.end(), newline_tokens.begin(), newline_tokens.end());
+  }
+  tokens.push_back(start_of_turn_id);                // <start_of_turn>
+  {
+    auto model_tokens = tokenizer_->Encode("model\n");
+    tokens.insert(tokens.end(), model_tokens.begin(), model_tokens.end());
+  }
   int32_t prompt_len = static_cast<int32_t>(tokens.size());
 
   std::cerr << "Input tokens: [";
@@ -119,6 +145,11 @@ std::string InferenceEngine::GenerateStreaming(
     Tensor single_token = Tensor::from_vector({static_cast<float>(next_token)});
     int32_t start_pos = prompt_len + i - 1;
     logits = model_->forward(single_token, start_pos, *kv_cache_, seq_id_);
+
+    // DEBUG: Verify KV cache is growing and RoPE position is advancing.
+    std::cerr << "[STEP " << i << "] kv_len="
+              << kv_cache_->SequenceLength(seq_id_)
+              << " rope_pos=" << start_pos << std::endl;
 
     next_token = Sample(logits, sampling_config);
     tokens.push_back(next_token);
